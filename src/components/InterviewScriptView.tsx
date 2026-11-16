@@ -118,18 +118,27 @@ export default function InterviewScriptView({
   return (
     <div className="space-y-6 pb-12">
 
-      {/* Header Banner */}
-      <div className="p-4 rounded-2xl bg-indigo-950/30 border border-indigo-900/40 flex items-center justify-between gap-3">
+      {/* Header Banner with Always-Available Regenerate Button */}
+      <div className="p-4 rounded-2xl bg-indigo-950/40 border border-indigo-900/50 flex items-center justify-between gap-3 shadow-sm flex-wrap">
         <div>
           <span className="text-[10px] font-bold text-indigo-400 uppercase tracking-wider block mb-1">
             Verbal Interview Delivery
           </span>
           <p className="text-xs text-slate-200">{data.problemSummary}</p>
         </div>
-        <div className="text-right shrink-0">
+        <div className="flex items-center gap-2 shrink-0">
           <span className="text-[11px] px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-medium">
             5 Stages Covered
           </span>
+          <button
+            onClick={onGenerate}
+            disabled={isLoading}
+            className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white shadow-md shadow-indigo-600/20 transition flex items-center gap-1.5"
+            title="Re-generate script for the current problem"
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            <span>Regenerate Script</span>
+          </button>
         </div>
       </div>
 

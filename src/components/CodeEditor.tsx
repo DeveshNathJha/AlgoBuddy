@@ -10,8 +10,12 @@ import {
   FileCode,
   FileText,
   Sparkles,
-  Code2
+  RotateCcw,
+  Eraser,
+  FilePlus,
+  Copy
 } from 'lucide-react';
+import { toast } from 'sonner';
 
 const Editor = dynamic(() => import('@monaco-editor/react'), {
   ssr: false,
@@ -34,6 +38,21 @@ interface CodeEditorProps {
   statusMessage: string;
 }
 
+export const getStarterTemplate = (lang: ProgrammingLanguage): string => {
+  switch (lang) {
+    case 'python':
+      return `def solution():\n    # Write your solution here\n    pass\n\n# Test execution:\nresult = solution()\nprint(result)\n`;
+    case 'java':
+      return `import java.util.*;\n\nclass Solution {\n    public void solve() {\n        // Write your solution here\n    }\n\n    public static void main(String[] args) {\n        Solution s = new Solution();\n        s.solve();\n    }\n}\n`;
+    case 'cpp':
+      return `#include <iostream>\n#include <vector>\nusing namespace std;\n\nclass Solution {\npublic:\n    void solve() {\n        // Write your solution here\n    }\n};\n\nint main() {\n    Solution s;\n    s.solve();\n    return 0;\n}\n`;
+    case 'javascript':
+      return `function solution() {\n    // Write your solution here\n    return null;\n}\n\nconsole.log(solution());\n`;
+    default:
+      return '';
+  }
+};
+
 export default function CodeEditor({
   code,
   setCode,
@@ -50,11 +69,16 @@ export default function CodeEditor({
 
   const handleSelectPreset = (presetId: string) => {
     setSelectedPresetId(presetId);
+    if (!presetId) {
+      // Switched to Custom Problem
+      return;
+    }
     const selected = DSA_PRESETS.find((p) => p.id === presetId);
     if (selected) {
       setProblemText(selected.description);
       const codeForLang = selected.codeByLanguage?.[language] || selected.defaultCode;
       setCode(codeForLang);
+      toast.info(`Loaded preset: ${selected.title}`);
     }
   };
 
@@ -63,7 +87,26 @@ export default function CodeEditor({
     const selected = DSA_PRESETS.find((p) => p.id === selectedPresetId);
     if (selected && selected.codeByLanguage?.[newLang]) {
       setCode(selected.codeByLanguage[newLang]!);
+    } else if (!selectedPresetId) {
+      // If custom problem, offer clean template if current code is empty or from other preset
+      if (!code.trim() || code.includes('def twoSum') || code.includes('class Solution')) {
+        setCode(getStarterTemplate(newLang));
+      }
     }
+  };
+
+  // Reset to a clean custom problem workspace
+  const handleNewCustomProblem = () => {
+    setSelectedPresetId('');
+    setProblemText('');
+    setCode(getStarterTemplate(language));
+    toast.success('Clean workspace ready! Paste your custom problem & code.');
+  };
+
+  // Reset code block to language starter template
+  const handleResetCode = () => {
+    setCode(getStarterTemplate(language));
+    toast.info(`Reset to fresh ${language.toUpperCase()} template.`);
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -80,8 +123,12 @@ export default function CodeEditor({
         file.name.endsWith('.js')
       ) {
         setCode(content);
+        setSelectedPresetId('');
+        toast.success(`Imported code from ${file.name}`);
       } else {
         setProblemText(content);
+        setSelectedPresetId('');
+        toast.success(`Imported problem description from ${file.name}`);
       }
     };
     reader.readAsText(file);
@@ -95,20 +142,19 @@ export default function CodeEditor({
       
       {/* 1. Problem Description Input */}
       <div className="rounded-2xl bg-slate-900/80 border border-slate-800 p-4 shadow-sm">
-        <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-800">
+        <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-800 flex-wrap gap-2">
           <div className="flex items-center gap-2">
             <FileText className="w-4 h-4 text-indigo-400" />
             <span className="text-xs font-bold text-white uppercase tracking-wider">
-              Problem Statement &amp; Constraints
+              Problem Statement
             </span>
           </div>
 
           <div className="flex items-center gap-2">
-            <span className="text-[11px] text-slate-400 hidden sm:inline">Preset:</span>
             <select
               value={selectedPresetId}
               onChange={(e) => handleSelectPreset(e.target.value)}
-              className="bg-slate-950 border border-slate-800 text-[11px] rounded-lg px-2 py-1 text-slate-200 focus:outline-none focus:border-indigo-500 font-medium"
+              className="bg-slate-950 border border-slate-800 text-[11px] rounded-lg px-2.5 py-1 text-slate-200 focus:outline-none focus:border-indigo-500 font-medium"
             >
               <option value="">Custom Problem</option>
               {DSA_PRESETS.map((p) => (
@@ -117,6 +163,15 @@ export default function CodeEditor({
                 </option>
               ))}
             </select>
+
+            <button
+              onClick={handleNewCustomProblem}
+              className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition flex items-center gap-1 text-[11px] px-2 border border-slate-800 bg-slate-950"
+              title="Start a fresh custom problem (clears text and sets clean starter template)"
+            >
+              <FilePlus className="w-3.5 h-3.5 text-indigo-400" />
+              <span>New</span>
+            </button>
           </div>
         </div>
 
@@ -124,7 +179,9 @@ export default function CodeEditor({
           value={problemText}
           onChange={(e) => {
             setProblemText(e.target.value);
-            setSelectedPresetId('');
+            if (selectedPresetId) {
+              setSelectedPresetId('');
+            }
           }}
           placeholder="Paste problem description, input/output samples, or import .md file..."
           rows={3}
@@ -149,13 +206,15 @@ export default function CodeEditor({
               <span>Import File</span>
             </button>
           </div>
-          <span className="text-[10px] text-slate-500">Supports Raw Text and Markdown</span>
+          <span className="text-[10px] text-slate-500">
+            {selectedPresetId ? 'Preset Active' : 'Custom Problem Active'}
+          </span>
         </div>
       </div>
 
       {/* 2. Monaco Code Editor & Language Switcher */}
       <div className="rounded-2xl bg-slate-900/80 border border-slate-800 p-4 shadow-sm flex-1 flex flex-col min-h-[380px]">
-        <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-800">
+        <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-800 flex-wrap gap-2">
           <div className="flex items-center gap-2">
             <FileCode className="w-4 h-4 text-emerald-400" />
             
@@ -170,13 +229,23 @@ export default function CodeEditor({
               <option value="cpp">C++ (STL)</option>
               <option value="javascript">JavaScript (ES6)</option>
             </select>
+
+            {/* Reset / Clear Code button */}
+            <button
+              onClick={handleResetCode}
+              className="text-[11px] text-slate-400 hover:text-white px-2 py-1 rounded-lg hover:bg-slate-800 transition flex items-center gap-1"
+              title="Reset code editor to starter template for current language"
+            >
+              <Eraser className="w-3 h-3 text-slate-500" />
+              <span>Reset Code</span>
+            </button>
           </div>
 
           <button
             onClick={onRunTrace}
             disabled={isTracing}
             className="px-4 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-semibold text-xs shadow-sm transition flex items-center gap-1.5"
-            title={language === 'python' ? 'Trace Python execution' : 'Visual execution engine runs Python code'}
+            title={language === 'python' ? 'Trace Python execution step-by-step' : 'Visual execution engine runs Python code'}
           >
             {isTracing ? (
               <>

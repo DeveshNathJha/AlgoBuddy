@@ -84,6 +84,23 @@ export interface ProgressiveHint {
   revealed: boolean;
 }
 
+export interface ProblemApproach {
+  approachName: string;
+  tier: 'brute-force' | 'better' | 'optimal';
+  timeComplexity: string;
+  spaceComplexity: string;
+  intuition: string;
+  stepByStepAlgorithm: string[];
+  pseudocodeOrSnippet: string;
+  tradeoffsAndDrawbacks: string;
+}
+
+export interface ImplementationBlueprint {
+  dataStructuresNeeded: string[];
+  algorithmSteps: string[];
+  starterCodeTemplate: string;
+}
+
 export interface ThinkingGuideData {
   simplifiedProblem: string;
   coreConstraints: string[];
@@ -91,6 +108,7 @@ export interface ThinkingGuideData {
     patternName: string;
     whyThisPattern: string;
   }[];
+  approaches?: ProblemApproach[];
   bruteForce: {
     approach: string;
     timeComplexity: string;
@@ -103,6 +121,7 @@ export interface ThinkingGuideData {
     spaceComplexity: string;
     keyIntuition: string;
   };
+  implementationBlueprint?: ImplementationBlueprint;
   edgeCases: string[];
   hints: ProgressiveHint[];
 }

@@ -83,6 +83,14 @@ export default function Home() {
       }
       const savedUsed = parseInt(localStorage.getItem('algobuddy_free_used') || localStorage.getItem('coding_buddy_free_used') || '0', 10);
 
+      const savedCustomProblem = localStorage.getItem('algobuddy_active_problem');
+      const savedCustomCode = localStorage.getItem('algobuddy_active_code');
+      const savedCustomTitle = localStorage.getItem('algobuddy_active_title');
+
+      if (savedCustomProblem) setProblemText(savedCustomProblem);
+      if (savedCustomCode) setCode(savedCustomCode);
+      if (savedCustomTitle) setProblemTitle(savedCustomTitle);
+
       setLanguage(savedLang);
       setActiveProvider(savedProvider);
       setApiKeys({
@@ -104,6 +112,24 @@ export default function Home() {
     setLanguage(newLang);
     localStorage.setItem('algobuddy_language', newLang);
     toast.info(`Language switched to ${newLang.toUpperCase()}`);
+  };
+
+  const handleProblemChange = (newText: string) => {
+    setProblemText(newText);
+    const firstLine = newText.trim().split('\n')[0].replace(/^#+\s*/, '').substring(0, 40);
+    const newTitle = firstLine || 'Custom Problem';
+    setProblemTitle(newTitle);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('algobuddy_active_problem', newText);
+      localStorage.setItem('algobuddy_active_title', newTitle);
+    }
+  };
+
+  const handleCodeChange = (newCode: string) => {
+    setCode(newCode);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('algobuddy_active_code', newCode);
+    }
   };
 
   const handleSaveKeys = (provider: AIProvider, key: string, model: string) => {
@@ -310,14 +336,9 @@ export default function Home() {
         <div className="lg:col-span-5 h-[calc(100vh-7rem)] flex flex-col">
           <CodeEditor
             code={code}
-            setCode={setCode}
+            setCode={handleCodeChange}
             problemText={problemText}
-            setProblemText={(txt) => {
-              setProblemText(txt);
-              // Extract first line as title candidate
-              const firstLine = txt.trim().split('\n')[0].replace(/^#+\s*/, '').substring(0, 40);
-              setProblemTitle(firstLine || 'Custom Problem');
-            }}
+            setProblemText={handleProblemChange}
             language={language}
             setLanguage={handleLanguageChange}
             onRunTrace={handleRunTrace}
@@ -333,6 +354,10 @@ export default function Home() {
               data={thinkingData}
               isLoading={isThinkingLoading}
               onGenerate={handleGenerateThinking}
+              onLoadStarterCode={(starterCode) => {
+                handleCodeChange(starterCode);
+                toast.success('Starter code scaffold loaded into Monaco editor!');
+              }}
             />
           )}
 
