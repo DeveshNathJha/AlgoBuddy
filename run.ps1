@@ -1,6 +1,6 @@
-# Coding Buddy PowerShell Startup Script
+# AlgoBuddy PowerShell Startup Script
 Write-Host "===================================================" -ForegroundColor Cyan
-Write-Host "          Starting Coding Buddy Server...          " -ForegroundColor Cyan
+Write-Host "          Starting AlgoBuddy Server...             " -ForegroundColor Cyan
 Write-Host "===================================================" -ForegroundColor Cyan
 Write-Host ""
 

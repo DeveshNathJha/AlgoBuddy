@@ -1,7 +1,7 @@
 @echo off
-title Coding Buddy Runner
+title AlgoBuddy Runner
 echo ===================================================
-echo           Starting Coding Buddy Server...
+echo           Starting AlgoBuddy Server...
 echo ===================================================
 echo.
 
@@ -31,8 +31,8 @@ echo [INFO] Launching server on http://localhost:3000
 echo [INFO] Press Ctrl+C in this terminal to stop the server.
 echo.
 
-:: Automatically open browser after 2 seconds in background
-start "" timeout /t 2 /nobreak >nul & start http://localhost:3000
+:: Automatically open browser
+start http://localhost:3000
 
 :: Start dev server
 call npm run dev
