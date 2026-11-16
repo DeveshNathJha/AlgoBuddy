@@ -26,6 +26,16 @@ function getSecret(): string {
   return devSecret;
 }
 
+/** False in production when SESSION_SECRET is missing or too short: nobody can sign in. */
+export function isSessionConfigured(): boolean {
+  try {
+    getSecret();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function sign(payload: string): string {
   return crypto.createHmac('sha256', getSecret()).update(payload).digest('base64url');
 }

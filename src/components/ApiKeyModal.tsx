@@ -15,6 +15,7 @@ interface ApiKeyModalProps {
   selectedModels: Record<AIProvider, string>;
   onSaveKeys: (provider: AIProvider, key: string, model: string) => void;
   freeLimit: number;
+  onOpenAbout: () => void;
 }
 
 const PROVIDERS: Record<AIProvider, { name: string; note: string; portalUrl: string; placeholder: string; steps: string[] }> = {
@@ -41,7 +42,7 @@ const PROVIDERS: Record<AIProvider, { name: string; note: string; portalUrl: str
   },
 };
 
-export default function ApiKeyModal({ isOpen, onClose, provider, setProvider, apiKeys, selectedModels, onSaveKeys, freeLimit }: ApiKeyModalProps) {
+export default function ApiKeyModal({ isOpen, onClose, provider, setProvider, apiKeys, selectedModels, onSaveKeys, freeLimit, onOpenAbout }: ApiKeyModalProps) {
   const [keyInput, setKeyInput] = useState('');
   const [model, setModel] = useState('');
   const [models, setModels] = useState<string[]>([]);
@@ -194,7 +195,10 @@ export default function ApiKeyModal({ isOpen, onClose, provider, setProvider, ap
 
         <p className="text-xs text-fg-subtle leading-5">
           Your key is stored only in this browser. With each request it is sent over HTTPS to the AlgoBuddy server, which passes it to {meta.name} and never
-          stores or logs it. Tip: make a separate key just for AlgoBuddy so you can revoke it any time.
+          stores or logs it. Tip: make a separate key just for AlgoBuddy so you can revoke it any time.{' '}
+          <button type="button" onClick={onOpenAbout} className="text-accent-text hover:underline">
+            More about how AlgoBuddy uses AI and your data
+          </button>
         </p>
       </div>
     </Modal>

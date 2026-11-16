@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { normalizeEmail, recordVerifiedUser } from '@/lib/userStore';
-import { attachSessionCookie } from '@/lib/session';
+import { attachSessionCookie, isSessionConfigured } from '@/lib/session';
 
 /**
  * POST /api/auth/google  { credential }
@@ -10,6 +10,10 @@ import { attachSessionCookie } from '@/lib/session';
  * signature and also accepted a raw `email` field, so anyone could sign in as anyone.
  */
 export async function POST(req: NextRequest) {
+  if (!isSessionConfigured()) {
+    console.error('[Auth] SESSION_SECRET is missing or shorter than 32 characters: sign-in is disabled. Set it in Vercel > Settings > Environment Variables and redeploy.');
+    return NextResponse.json({ success: false, error: 'Sign-in is temporarily unavailable. You can still use AlgoBuddy with your own free API key.' }, { status: 503 });
+  }
   try {
     const { credential } = await req.json();
     const clientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
@@ -38,6 +42,6 @@ export async function POST(req: NextRequest) {
     return attachSessionCookie(NextResponse.json({ success: true, user: { email } }), email);
   } catch (e: any) {
     console.error('[Auth] Google sign-in failed:', e?.message);
-    return NextResponse.json({ success: false, error: 'Google authentication failed.' }, { status: 500 });
+    return NextResponse.json({ success: false, error: 'Google sign-in failed. Please try again in a moment.' }, { status: 500 });
   }
 }

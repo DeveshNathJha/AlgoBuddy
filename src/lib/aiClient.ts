@@ -413,7 +413,7 @@ function assertLength(problemText: string, code?: string) {
 }
 
 // ─────────────────────────────────────────────
-// Feature A: Thinking Guide ("Kaise Sochna Hai")
+// Feature A: Thinking Guide (the "How to Think" tab)
 // ─────────────────────────────────────────────
 
 export async function generateThinkingGuide(
