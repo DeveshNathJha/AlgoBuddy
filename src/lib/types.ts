@@ -158,3 +158,27 @@ export interface DsaPreset {
   defaultCode: string;
   codeByLanguage?: Partial<Record<ProgrammingLanguage, string>>;
 }
+
+// ==========================================
+// 5. CODE DOCTOR / DEBUGGER & CHECKER TYPES
+// ==========================================
+
+export interface CodeCheckBug {
+  lineNumber?: number;
+  issueType: 'syntax' | 'runtime' | 'logic' | 'edge-case' | 'complexity';
+  title: string;
+  explanation: string;
+  problematicSnippet?: string;
+  fixedSnippet?: string;
+}
+
+export interface CodeCheckResult {
+  status: 'clean' | 'issues_found';
+  summary: string;
+  overallScore: number; // e.g. 85 / 100
+  timeComplexity: string;
+  spaceComplexity: string;
+  bugs: CodeCheckBug[];
+  fixedFullCode: string;
+  learningAdvice: string;
+}

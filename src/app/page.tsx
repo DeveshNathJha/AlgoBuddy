@@ -9,13 +9,15 @@ import InterviewScriptView from '@/components/InterviewScriptView';
 import NotesView from '@/components/NotesView';
 import ApiKeyModal from '@/components/ApiKeyModal';
 import GmailAuthModal from '@/components/GmailAuthModal';
+import CodeDoctorModal from '@/components/CodeDoctorModal';
 import { runPythonWithTrace } from '@/lib/pyodideRunner';
 import {
   TraceResult,
   ThinkingGuideData,
   InterviewScriptData,
   AIProvider,
-  ProgrammingLanguage
+  ProgrammingLanguage,
+  CodeCheckResult
 } from '@/lib/types';
 import { DSA_PRESETS } from '@/lib/presets';
 import { toast } from 'sonner';
@@ -41,6 +43,9 @@ export default function Home() {
   const [isThinkingLoading, setIsThinkingLoading] = useState<boolean>(false);
   const [interviewData, setInterviewData] = useState<InterviewScriptData | null>(null);
   const [isInterviewLoading, setIsInterviewLoading] = useState<boolean>(false);
+  const [codeDoctorResult, setCodeDoctorResult] = useState<CodeCheckResult | null>(null);
+  const [isCheckingCode, setIsCheckingCode] = useState<boolean>(false);
+  const [isDoctorModalOpen, setIsDoctorModalOpen] = useState<boolean>(false);
 
   // Multi-Provider & BYOK States
   const [activeProvider, setActiveProvider] = useState<AIProvider>('gemini');
@@ -334,6 +339,54 @@ export default function Home() {
     }
   };
 
+  // 4. Code Doctor: Algorithmic Bug Diagnosis & 1-Click Fix
+  const handleCheckCode = async () => {
+    if (!code || !code.trim()) {
+      toast.warning('Please enter code in the editor to inspect.');
+      return;
+    }
+
+    if (!checkAccessPermission()) return;
+
+    setIsCheckingCode(true);
+    setIsDoctorModalOpen(true);
+    try {
+      const res = await fetch('/api/ai/check-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          problemText,
+          code,
+          errorOutput: statusMessage.toLowerCase().includes('error') ? statusMessage : undefined,
+          provider: activeProvider,
+          userApiKey: activeKey || undefined,
+          model: activeModel,
+          language,
+        }),
+      });
+
+      const resData = await res.json();
+      if (resData.success) {
+        setCodeDoctorResult(resData.data);
+        recordQuestionUsage();
+        if (resData.data.status === 'clean') {
+          toast.success('Code passed algorithmic inspection!');
+        } else {
+          toast.info(`Code Doctor found ${resData.data.bugs?.length || 0} issues in code.`);
+        }
+      } else {
+        if (resData.requiresKey) {
+          setIsKeyModalOpen(true);
+        }
+        toast.error(resData.error || 'Failed to inspect code.');
+      }
+    } catch (e: any) {
+      toast.error('Network error: ' + e.message);
+    } finally {
+      setIsCheckingCode(false);
+    }
+  };
+
   return (
     <div className="min-h-screen flex flex-col bg-slate-950 text-slate-100">
       
@@ -364,6 +417,8 @@ export default function Home() {
             onRunTrace={handleRunTrace}
             isTracing={isTracing}
             statusMessage={statusMessage}
+            onCheckCode={handleCheckCode}
+            isCheckingCode={isCheckingCode}
           />
         </div>
 
@@ -439,6 +494,19 @@ export default function Home() {
         userEmail={userEmail}
         onLogin={handleLogin}
         onLogout={handleLogout}
+      />
+
+      {/* Code Doctor: Algorithmic Bug Diagnosis & 1-Click Fixer */}
+      <CodeDoctorModal
+        isOpen={isDoctorModalOpen}
+        onClose={() => setIsDoctorModalOpen(false)}
+        result={codeDoctorResult}
+        isLoading={isCheckingCode}
+        onApplyFix={(fixedCode) => {
+          handleCodeChange(fixedCode);
+          toast.success('Corrected code loaded into editor!');
+        }}
+        language={language}
       />
 
     </div>

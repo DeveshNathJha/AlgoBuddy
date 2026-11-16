@@ -13,7 +13,9 @@ import {
   RotateCcw,
   Eraser,
   FilePlus,
-  Copy
+  Copy,
+  Stethoscope,
+  Wrench
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -36,6 +38,8 @@ interface CodeEditorProps {
   onRunTrace: () => void;
   isTracing: boolean;
   statusMessage: string;
+  onCheckCode?: () => void;
+  isCheckingCode?: boolean;
 }
 
 export const getStarterTemplate = (lang: ProgrammingLanguage): string => {
@@ -63,6 +67,8 @@ export default function CodeEditor({
   onRunTrace,
   isTracing,
   statusMessage,
+  onCheckCode,
+  isCheckingCode,
 }: CodeEditorProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [selectedPresetId, setSelectedPresetId] = useState<string>(DSA_PRESETS[0].id);
@@ -241,24 +247,47 @@ export default function CodeEditor({
             </button>
           </div>
 
-          <button
-            onClick={onRunTrace}
-            disabled={isTracing}
-            className="px-4 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-semibold text-xs shadow-sm transition flex items-center gap-1.5"
-            title={language === 'python' ? 'Trace Python execution step-by-step' : 'Visual execution engine runs Python code'}
-          >
-            {isTracing ? (
-              <>
-                <span className="w-3.5 h-3.5 rounded-full border-2 border-white border-t-transparent animate-spin" />
-                <span>Tracing...</span>
-              </>
-            ) : (
-              <>
-                <Play className="w-3.5 h-3.5 fill-current" />
-                <span>Run Code &amp; Trace</span>
-              </>
+          <div className="flex items-center gap-2">
+            {onCheckCode && (
+              <button
+                onClick={onCheckCode}
+                disabled={isCheckingCode}
+                className="px-3 py-1.5 rounded-xl bg-indigo-600/90 hover:bg-indigo-600 disabled:opacity-50 text-white font-semibold text-xs shadow-sm transition flex items-center gap-1.5"
+                title="Diagnose algorithmic bugs, edge case risks & view verified fix"
+              >
+                {isCheckingCode ? (
+                  <>
+                    <span className="w-3.5 h-3.5 rounded-full border-2 border-white border-t-transparent animate-spin" />
+                    <span>Checking...</span>
+                  </>
+                ) : (
+                  <>
+                    <Stethoscope className="w-3.5 h-3.5" />
+                    <span>Check &amp; Fix</span>
+                  </>
+                )}
+              </button>
             )}
-          </button>
+
+            <button
+              onClick={onRunTrace}
+              disabled={isTracing}
+              className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-semibold text-xs shadow-sm transition flex items-center gap-1.5"
+              title={language === 'python' ? 'Trace Python execution step-by-step' : 'Visual execution engine runs Python code'}
+            >
+              {isTracing ? (
+                <>
+                  <span className="w-3.5 h-3.5 rounded-full border-2 border-white border-t-transparent animate-spin" />
+                  <span>Tracing...</span>
+                </>
+              ) : (
+                <>
+                  <Play className="w-3.5 h-3.5 fill-current" />
+                  <span>Run &amp; Trace</span>
+                </>
+              )}
+            </button>
+          </div>
         </div>
 
         {/* Monaco Editor Container */}
@@ -285,9 +314,21 @@ export default function CodeEditor({
         </div>
 
         {statusMessage && (
-          <div className="mt-2 text-[11px] text-indigo-300 bg-indigo-950/40 border border-indigo-800/40 px-3 py-1.5 rounded-lg flex items-center gap-2">
-            <Sparkles className="w-3 h-3 text-indigo-400 shrink-0" />
-            <span>{statusMessage}</span>
+          <div className="mt-2 text-[11px] text-indigo-300 bg-indigo-950/40 border border-indigo-800/40 px-3 py-1.5 rounded-lg flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-2">
+              <Sparkles className="w-3 h-3 text-indigo-400 shrink-0" />
+              <span>{statusMessage}</span>
+            </div>
+            {onCheckCode && statusMessage.toLowerCase().includes('error') && (
+              <button
+                onClick={onCheckCode}
+                className="text-[10px] font-semibold text-rose-300 hover:text-white bg-rose-950/60 hover:bg-rose-900 border border-rose-800/60 px-2 py-0.5 rounded transition flex items-center gap-1"
+                title="Open Code Doctor to diagnose this execution failure"
+              >
+                <Stethoscope className="w-3 h-3 text-rose-400" />
+                <span>Diagnose with Code Doctor</span>
+              </button>
+            )}
           </div>
         )}
       </div>

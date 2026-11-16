@@ -13,7 +13,13 @@
  */
 
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { ThinkingGuideData, InterviewScriptData, AIProvider } from './types';
+import {
+  ThinkingGuideData,
+  InterviewScriptData,
+  AIProvider,
+  CodeCheckResult,
+  CodeCheckBug
+} from './types';
 
 interface GenerationOptions {
   provider?: AIProvider;
@@ -715,4 +721,151 @@ Provide JSON:
 
   const raw = await callLLM(prompt, systemInstruction, options);
   return extractAndParseJSON<{ explanation: string; whyItRan: string }>(raw);
+}
+
+/**
+ * FEATURE E: Code Doctor & Algorithmic Debugger
+ */
+export function sanitizeCodeCheckResult(
+  raw: any,
+  originalCode: string,
+  lang: string = 'Python'
+): CodeCheckResult {
+  if (!raw || typeof raw !== 'object') {
+    throw new Error('Invalid code inspection data returned.');
+  }
+
+  const status = raw.status === 'clean' ? 'clean' : 'issues_found';
+  const summary =
+    typeof raw.summary === 'string' && raw.summary.trim()
+      ? raw.summary.trim()
+      : status === 'clean'
+      ? 'Code syntax and algorithmic logic passed checks.'
+      : 'Identified potential bugs, runtime risks, or edge case oversights in the code.';
+
+  const overallScore =
+    typeof raw.overallScore === 'number' && !isNaN(raw.overallScore)
+      ? Math.max(0, Math.min(100, Math.round(raw.overallScore)))
+      : status === 'clean'
+      ? 95
+      : 65;
+
+  const timeComplexity =
+    typeof raw.timeComplexity === 'string' && raw.timeComplexity.trim() ? raw.timeComplexity.trim() : 'O(N)';
+  const spaceComplexity =
+    typeof raw.spaceComplexity === 'string' && raw.spaceComplexity.trim() ? raw.spaceComplexity.trim() : 'O(1)';
+
+  let bugs: CodeCheckBug[] = [];
+  if (Array.isArray(raw.bugs)) {
+    bugs = raw.bugs.map((b: any, i: number) => {
+      const issueType = ['syntax', 'runtime', 'logic', 'edge-case', 'complexity'].includes(b?.issueType)
+        ? b.issueType
+        : 'logic';
+
+      return {
+        lineNumber: typeof b?.lineNumber === 'number' ? b.lineNumber : undefined,
+        issueType,
+        title: typeof b?.title === 'string' && b.title.trim() ? b.title.trim() : `Issue ${i + 1}`,
+        explanation:
+          typeof b?.explanation === 'string' && b.explanation.trim()
+            ? b.explanation.trim()
+            : 'Potential logic defect, off-by-one check, or unhandled edge case.',
+        problematicSnippet:
+          typeof b?.problematicSnippet === 'string' && b.problematicSnippet.trim()
+            ? b.problematicSnippet.trim()
+            : undefined,
+        fixedSnippet:
+          typeof b?.fixedSnippet === 'string' && b.fixedSnippet.trim()
+            ? b.fixedSnippet.trim()
+            : undefined,
+      };
+    });
+  }
+
+  const fixedFullCode =
+    typeof raw.fixedFullCode === 'string' && raw.fixedFullCode.trim()
+      ? raw.fixedFullCode
+      : originalCode;
+
+  const learningAdvice =
+    typeof raw.learningAdvice === 'string' && raw.learningAdvice.trim()
+      ? raw.learningAdvice.trim()
+      : 'Always trace boundary conditions, loop termination conditions, and verify invariant states.';
+
+  return {
+    status,
+    summary,
+    overallScore,
+    timeComplexity,
+    spaceComplexity,
+    bugs,
+    fixedFullCode,
+    learningAdvice,
+  };
+}
+
+export async function checkAndFixCode(
+  problemText: string,
+  code: string,
+  errorOutput?: string,
+  options: GenerationOptions & { language?: string } = {}
+): Promise<CodeCheckResult> {
+  if (!code || !code.trim()) {
+    throw new Error('Please provide code to analyze.');
+  }
+
+  const lang = options.language || 'Python';
+
+  const systemInstruction = `
+You are AlgoBuddy Code Doctor, an elite senior FAANG technical interviewer and algorithmic debugger.
+The candidate wrote code in ${lang} for a DSA problem.
+Analyze the candidate's code with surgical precision:
+1. Syntax & Compilation: Catch any malformed syntax, wrong method calls, type mismatches, or missing standard imports in ${lang}.
+2. Runtime & Exception Risks: If an errorOutput is provided, pinpoint exactly why it crashed (e.g. IndexError, NullPointerException, recursion depth, stack overflow).
+3. Logic & Off-By-One Errors: Scrutinize loop bounds (< vs <=), pointer transitions, base cases, and state transitions.
+4. Edge Case Omissions: Empty array/matrix, single element, negative values, extreme constraints, duplicates, integer overflow.
+5. Provide the Clean Fixed Code: Provide the complete, production-grade, bug-free runnable solution retaining the candidate's core algorithmic approach and variable naming wherever possible.
+6. Score the code from 0 to 100 based on algorithmic correctness, edge case safety, and interview readiness.
+
+Respond strictly in valid, unescaped JSON matching the requested schema.
+`;
+
+  const prompt = `
+Problem Statement:
+"""
+${problemText}
+"""
+
+Candidate's Code (${lang}):
+"""
+${code}
+"""
+
+${errorOutput ? `Runtime / Execution Error Recorded:\n"""\n${errorOutput}\n"""` : 'No runtime crash recorded; perform static algorithmic & edge-case correctness audit.'}
+
+Return JSON strictly matching this schema:
+{
+  "status": "clean" | "issues_found",
+  "summary": "1-2 sentence overview of code health and diagnosis",
+  "overallScore": 75,
+  "timeComplexity": "O(...)",
+  "spaceComplexity": "O(...)",
+  "bugs": [
+    {
+      "lineNumber": 14,
+      "issueType": "logic",
+      "title": "Short descriptive title (e.g. Off-by-one boundary check)",
+      "explanation": "Why this fails and what test case triggers it",
+      "problematicSnippet": "while left <= right:",
+      "fixedSnippet": "while left < right:"
+    }
+  ],
+  "fixedFullCode": "// Complete, bug-free, runnable code in ${lang} solving the problem correctly",
+  "learningAdvice": "Pedagogical key takeaway to remember during interview"
+}
+`;
+
+  const raw = await callLLM(prompt, systemInstruction, options);
+  const parsed = extractAndParseJSON<any>(raw);
+  return sanitizeCodeCheckResult(parsed, code, lang);
 }
