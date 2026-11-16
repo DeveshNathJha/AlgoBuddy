@@ -67,7 +67,11 @@ function extractAndParseJSON<T>(rawText: string): T {
  */
 async function callLLM(prompt: string, systemInstruction: string, options: GenerationOptions): Promise<string> {
   const provider = options.provider || 'gemini';
-  const apiKey = options.apiKey || process.env.MASTER_GEMINI_API_KEY;
+  const apiKey =
+    options.apiKey ||
+    (provider === 'groq' ? process.env.GROQ_API_KEY : null) ||
+    (provider === 'gemini' ? (process.env.GEMINI_API_KEY || process.env.MASTER_GEMINI_API_KEY) : null) ||
+    (provider === 'openai' ? process.env.OPENAI_API_KEY : null);
 
   if (!apiKey) {
     throw new Error(
