@@ -1,39 +1,14 @@
-import { NextRequest, NextResponse } from 'next/server';
 import { generateThinkingGuide } from '@/lib/aiClient';
+import { handleAIRequest } from '@/lib/aiRoute';
+import { UserError } from '@/lib/errors';
 
-/**
- * POST /api/ai/thinking-guide
- * Accepts: { problemText, codeSnippet, provider, userApiKey, model }
- * Returns structured algorithmic breakdown and progressive hints
- */
-export async function POST(req: NextRequest) {
-  try {
-    const body = await req.json();
-    const { problemText, codeSnippet, provider, userApiKey, model, language } = body;
+// Long structured generations can exceed Vercel's default function timeout.
+export const maxDuration = 60;
 
-    if (!problemText || typeof problemText !== 'string' || problemText.trim().length === 0) {
-      return NextResponse.json(
-        { error: 'Problem description is required.' },
-        { status: 400 }
-      );
-    }
-
-    const data = await generateThinkingGuide(problemText, codeSnippet, {
-      provider,
-      apiKey: userApiKey,
-      model,
-      language,
-    });
-
-    return NextResponse.json({ success: true, data });
-  } catch (err: any) {
-    console.error('Error in thinking-guide API:', err);
-    const message = err.message || 'Failed to generate thinking guide.';
-    const requiresKey = message.toLowerCase().includes('api key not found') || message.includes('API key not found');
-
-    return NextResponse.json(
-      { error: message, requiresKey },
-      { status: 500 }
-    );
+/** POST /api/ai/thinking-guide  { problemText, codeSnippet?, provider, userApiKey?, model?, language } */
+export const POST = handleAIRequest(async ({ body, provider, apiKey, model, language }) => {
+  if (typeof body.problemText !== 'string' || !body.problemText.trim()) {
+    throw new UserError('Enter a problem first.');
   }
-}
+  return generateThinkingGuide(body.problemText, body.codeSnippet, { provider, apiKey, model, language });
+});

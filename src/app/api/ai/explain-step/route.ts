@@ -1,44 +1,28 @@
-import { NextRequest, NextResponse } from 'next/server';
 import { explainTraceStep } from '@/lib/aiClient';
+import { handleAIRequest } from '@/lib/aiRoute';
+import { UserError } from '@/lib/errors';
 
-/**
- * POST /api/ai/explain-step
- * Accepts: { codeLine, lineNumber, variablesBefore, variablesAfter, changedVars, provider, userApiKey, model }
- * Returns on-demand concise explanation of a single trace step
- */
-export async function POST(req: NextRequest) {
-  try {
-    const body = await req.json();
-    const {
-      codeLine,
-      lineNumber,
-      variablesBefore,
-      variablesAfter,
-      changedVars,
-      provider,
-      userApiKey,
-      model,
-    } = body;
+export const maxDuration = 30;
 
-    const data = await explainTraceStep(
-      codeLine || '',
-      lineNumber || 1,
-      variablesBefore || {},
-      variablesAfter || {},
-      changedVars || [],
-      {
-        provider,
-        apiKey: userApiKey,
-        model,
-      }
-    );
+const asVars = (v: unknown): Record<string, string> | null =>
+  v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, string>) : null;
 
-    return NextResponse.json({ success: true, data });
-  } catch (err: any) {
-    console.error('Error in explain-step API:', err);
-    return NextResponse.json(
-      { error: err.message || 'Failed to explain trace step.' },
-      { status: 500 }
-    );
-  }
-}
+/** POST /api/ai/explain-step  { code, lineNumber, event, functionName, iteration, variablesBefore, variablesAfter, changedVars, nextAction?, returnValue? } */
+export const POST = handleAIRequest(async ({ body, provider, apiKey, model }) => {
+  if (typeof body.code !== 'string' || !body.code.trim()) throw new UserError('Run your code again, then try Explain.');
+  return explainTraceStep(
+    {
+      code: body.code.slice(0, 20000),
+      lineNumber: Number(body.lineNumber) || 1,
+      event: body.event === 'return' || body.event === 'exception' ? body.event : 'line',
+      functionName: typeof body.functionName === 'string' ? body.functionName : '<module>',
+      iteration: Number(body.iteration) || 1,
+      variablesBefore: asVars(body.variablesBefore) || {},
+      variablesAfter: asVars(body.variablesAfter),
+      changedVars: Array.isArray(body.changedVars) ? body.changedVars.map(String) : [],
+      nextAction: typeof body.nextAction === 'string' ? body.nextAction.slice(0, 200) : undefined,
+      returnValue: typeof body.returnValue === 'string' ? body.returnValue : undefined,
+    },
+    { provider, apiKey, model }
+  );
+});

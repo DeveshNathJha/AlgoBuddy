@@ -1,26 +1,31 @@
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 import './globals.css';
-import { Toaster } from 'sonner';
+import Providers from '@/components/Providers';
+import { THEME_STORAGE_KEY } from '@/lib/config';
 
 export const metadata: Metadata = {
-  title: 'AlgoBuddy - DSA Thinking Guide & Interview Presentation Coach',
-  description: 'Master algorithmic intuition, line-by-line execution tracing, and verbal interview presentation.',
+  title: 'AlgoBuddy: DSA thinking guide and interview coach',
+  description: 'Learn how to think through DSA problems, step through your code line by line, and practise explaining solutions in interviews.',
 };
 
-import Providers from '@/components/Providers';
+export const viewport: Viewport = {
+  themeColor: [
+    { media: '(prefers-color-scheme: light)', color: '#f6f7f9' },
+    { media: '(prefers-color-scheme: dark)', color: '#0d1117' },
+  ],
+};
 
-export default function RootLayout({
-  children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+// Runs before first paint so there is no light/dark flash.
+const themeScript = `(function(){try{var t=localStorage.getItem('${THEME_STORAGE_KEY}');if(t!=='light'&&t!=='dark'){t=window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';}document.documentElement.dataset.theme=t;}catch(e){document.documentElement.dataset.theme='dark';}})();`;
+
+export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className="dark">
-      <body className="bg-slate-950 text-slate-100 antialiased selection:bg-indigo-500 selection:text-white">
-        <Providers>
-          {children}
-        </Providers>
-        <Toaster position="top-right" richColors theme="dark" closeButton />
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: themeScript }} />
+      </head>
+      <body className="bg-bg text-fg font-sans antialiased">
+        <Providers>{children}</Providers>
       </body>
     </html>
   );

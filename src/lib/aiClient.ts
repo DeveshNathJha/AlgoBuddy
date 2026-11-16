@@ -1,871 +1,689 @@
 /**
- * AlgoBuddy - Multi-Provider AI Client
- * 
- * Supported Providers & Active Production Models:
- * - Google Gemini: gemini-1.5-flash, gemini-2.0-flash, gemini-1.5-pro
- * - Groq Cloud: openai/gpt-oss-20b, openai/gpt-oss-120b, qwen/qwen3.6-27b
- * - OpenAI: gpt-4o-mini, gpt-4o
- * 
- * Features:
- * - Robust regex JSON extractor (never crashes on markdown wrappers or extra commentary)
- * - Safe character limits
- * - AlgoBuddy pedagogical prompts
+ * AlgoBuddy - Multi-provider AI client (server only).
+ *
+ * Providers: Google Gemini, Groq, OpenAI. Every prompt asks for strict JSON, and
+ * each response goes through a sanitizer that guarantees the shape the UI expects.
+ * Sanitizers never invent "analysis" text: if the model returns nothing useful we
+ * throw, and the user sees a clear "please regenerate" error instead of generic filler.
  */
 
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import {
   ThinkingGuideData,
   InterviewScriptData,
   AIProvider,
   CodeCheckResult,
-  CodeCheckBug
+  CodeCheckBug,
+  ProblemApproach,
 } from './types';
+import {
+  MAX_CODE_LENGTH,
+  MAX_PROBLEM_LENGTH,
+  PROVIDER_MODELS,
+  RETIRED_MODELS,
+  commentPrefix,
+  languageLabel,
+} from './config';
+import { ProviderError, UserError } from './errors';
 
 interface GenerationOptions {
   provider?: AIProvider;
   apiKey?: string;
   model?: string;
+  language?: string;
 }
 
-const MAX_INPUT_LENGTH = 12000;
+const REQUEST_TIMEOUT_MS = 55_000;
 
 /**
- * Resilient JSON Extractor that safely extracts JSON objects even when LLMs
- * return conversational preamble, markdown fences, or minor syntax quirks.
+ * Formatting contract shared by every prompt. The UI renders `inline code` and
+ * **bold** and numbers lists itself, so models must not add their own numbering
+ * or markdown structure. Mixed formatting was what made text look jumbled.
  */
+const FORMAT_RULES = `
+Formatting rules (follow strictly):
+- Every text value is plain prose. No markdown headings, no bullet characters, no tables, no LaTeX (write O(n log n), not $O(n \\log n)$).
+- Wrap variable names, expressions and short code fragments in single backticks, e.g. \`left < right\`.
+- Use **double asterisks** only for at most one key phrase per paragraph.
+- Never start a list item with "Step 1:", "1.", "-" or similar. The UI numbers lists itself.
+- Keep each list item to one or two short sentences. Prefer short, clear sentences over long ones.
+- Only code fields (pseudocode, snippets, full code) may contain newlines, and they must contain real, properly indented code.
+
+If the problem text is only a short name or number (e.g. "LeetCode 42"), work on that well-known problem and name it fully in the first sentence. If you cannot tell which problem it is, say so plainly instead of guessing.
+`;
+
+// ─────────────────────────────────────────────
+// JSON + string helpers
+// ─────────────────────────────────────────────
+
 function extractAndParseJSON<T>(rawText: string): T {
   if (!rawText || typeof rawText !== 'string') {
-    throw new Error('Received empty response from AI provider.');
+    throw new UserError('The AI returned an empty answer. Please click Regenerate.');
   }
 
-  // 1. Strip standard code fence blocks
-  let cleaned = rawText
-    .replace(/^```json\s*/im, '')
-    .replace(/^```\s*/im, '')
-    .replace(/```\s*$/im, '')
+  const cleaned = rawText
+    .replace(/^\s*```(?:json)?\s*/i, '')
+    .replace(/\s*```\s*$/i, '')
     .trim();
 
-  // 2. Try direct JSON parse first
   try {
     return JSON.parse(cleaned) as T;
   } catch {
-    // 3. Fallback: Find outermost { and } boundary
-    const firstBrace = cleaned.indexOf('{');
-    const lastBrace = cleaned.lastIndexOf('}');
-
-    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-      const extracted = cleaned.substring(firstBrace, lastBrace + 1);
+    const first = cleaned.indexOf('{');
+    const last = cleaned.lastIndexOf('}');
+    if (first !== -1 && last > first) {
+      const extracted = cleaned.substring(first, last + 1);
       try {
         return JSON.parse(extracted) as T;
-      } catch (err: any) {
-        // Try removing trailing commas (e.g. [1, 2, ])
-        const sanitised = extracted.replace(/,\s*([}\]])/g, '$1');
-        return JSON.parse(sanitised) as T;
-      }
-    }
-
-    throw new Error('Failed to parse structured JSON from AI output. Please try again.');
-  }
-}
-
-/**
- * Universal safe array extractor that transforms arrays, strings, or malformed
- * objects into a guaranteed array of clean strings.
- */
-function toArrayOfStrings(val: any): string[] {
-  if (Array.isArray(val)) {
-    return val
-      .map((item) => {
-        if (typeof item === 'string') return item.trim();
-        if (typeof item === 'object' && item !== null) {
-          // If object has description or title or value
-          return (item.description || item.text || item.title || item.step || JSON.stringify(item)).trim();
+      } catch {
+        try {
+          return JSON.parse(extracted.replace(/,\s*([}\]])/g, '$1')) as T;
+        } catch {
+          /* fall through */
         }
-        return String(item).trim();
-      })
-      .filter(Boolean);
-  }
-
-  if (typeof val === 'string' && val.trim().length > 0) {
-    if (val.includes('\n')) {
-      return val
-        .split('\n')
-        .map((line) => line.replace(/^[-*•\d+.)]\s*/, '').trim())
-        .filter(Boolean);
+      }
     }
-    return [val.trim()];
+    throw new UserError('The AI returned an incomplete answer. Please click Regenerate.');
   }
-
-  if (typeof val === 'object' && val !== null) {
-    return Object.values(val)
-      .map((item) => (typeof item === 'string' ? item.trim() : String(item).trim()))
-      .filter(Boolean);
-  }
-
-  return [];
 }
 
-/**
- * Robust sanitizer that guarantees 100% schema integrity for ThinkingGuideData.
- * Prevents any runtime TypeError when React views call .map().
- */
-export function sanitizeThinkingGuideData(raw: any, lang: string = 'Python'): ThinkingGuideData {
-  if (!raw || typeof raw !== 'object') {
-    throw new Error('Invalid response structure received from AI.');
-  }
+function str(val: unknown): string {
+  return typeof val === 'string' ? val.trim() : '';
+}
 
-  const simplifiedProblem =
-    typeof raw.simplifiedProblem === 'string' && raw.simplifiedProblem.trim()
-      ? raw.simplifiedProblem.trim()
-      : 'Analyze the problem constraints and construct an optimal algorithmic solution.';
+/** Removes numbering the model added anyway ("Step 2:", "3.", "- ", "•"). */
+export function cleanListItem(text: string): string {
+  return text
+    .trim()
+    .replace(/^(?:step\s*\d+\s*[:.)-]\s*)/i, '')
+    .replace(/^(?:\d+\s*[.):-]\s+)/, '')
+    .replace(/^[-*•]\s+/, '')
+    .trim();
+}
 
-  const coreConstraints = toArrayOfStrings(raw.coreConstraints);
-  if (coreConstraints.length === 0) {
-    coreConstraints.push('Examine input size bounds and asymptotic runtime requirements.');
-    coreConstraints.push('Check boundary states, negative/duplicate values, and empty inputs.');
-  }
+function toArrayOfStrings(val: unknown): string[] {
+  let items: unknown[] = [];
+  if (Array.isArray(val)) items = val;
+  else if (typeof val === 'string') items = val.split('\n');
+  else if (val && typeof val === 'object') items = Object.values(val);
 
-  // Handle recognizedPatterns: could be [{patternName, whyThisPattern}] or ["Two Pointers", "Heap"]
-  let recognizedPatterns: Array<{ patternName: string; whyThisPattern: string }> = [];
-  if (Array.isArray(raw.recognizedPatterns)) {
-    recognizedPatterns = raw.recognizedPatterns.map((p: any) => {
-      if (typeof p === 'string') {
-        return {
-          patternName: p,
-          whyThisPattern: 'Selected to satisfy time and space efficiency requirements under given constraints.',
-        };
+  return items
+    .map((item) => {
+      if (typeof item === 'string') return item;
+      if (item && typeof item === 'object') {
+        const o = item as Record<string, unknown>;
+        return str(o.description) || str(o.text) || str(o.title) || str(o.step) || '';
       }
-      return {
-        patternName: typeof p?.patternName === 'string' && p.patternName.trim() ? p.patternName : 'Algorithmic Pattern',
-        whyThisPattern:
-          typeof p?.whyThisPattern === 'string' && p.whyThisPattern.trim()
-            ? p.whyThisPattern
-            : 'Essential pattern to meet target asymptotic complexity.',
-      };
-    });
-  } else if (typeof raw.recognizedPatterns === 'string') {
-    recognizedPatterns = [
-      {
-        patternName: 'Core Algorithmic Pattern',
-        whyThisPattern: raw.recognizedPatterns,
-      },
-    ];
-  }
-  if (recognizedPatterns.length === 0) {
-    recognizedPatterns.push({
-      patternName: 'Optimal Data Structure Traversal',
-      whyThisPattern: 'Identified based on problem invariants and runtime constraints.',
-    });
-  }
+      return item == null ? '' : String(item);
+    })
+    .map(cleanListItem)
+    .filter(Boolean);
+}
 
-  // Handle approaches
-  let rawApproaches: any[] = [];
-  if (Array.isArray(raw.approaches) && raw.approaches.length > 0) {
-    rawApproaches = raw.approaches;
-  } else {
-    // Fallback using bruteForce & optimizedApproach if present
-    rawApproaches = [
-      {
-        approachName: 'Approach 1: Brute Force',
-        tier: 'brute-force',
-        timeComplexity: raw.bruteForce?.timeComplexity || 'O(N^2)',
-        spaceComplexity: raw.bruteForce?.spaceComplexity || 'O(1)',
-        intuition: raw.bruteForce?.approach || 'Exhaustive search evaluating all possible candidate states.',
-        stepByStepAlgorithm: [raw.bruteForce?.approach || 'Check all combinations iteratively.'],
-        pseudocodeOrSnippet: '',
-        tradeoffsAndDrawbacks: raw.bruteForce?.drawback || 'Computationally inefficient for large problem bounds.',
-      },
-      {
-        approachName: 'Approach 2: Optimal Solution',
-        tier: 'optimal',
-        timeComplexity: raw.optimizedApproach?.timeComplexity || 'O(N)',
-        spaceComplexity: raw.optimizedApproach?.spaceComplexity || 'O(1)',
-        intuition: raw.optimizedApproach?.keyIntuition || 'Direct optimal traversal utilizing invariants.',
-        stepByStepAlgorithm: [raw.optimizedApproach?.approach || 'Single-pass optimal traversal.'],
-        pseudocodeOrSnippet: '',
-        tradeoffsAndDrawbacks: 'Target production complexity.',
-      },
-    ];
-  }
+function resolveModel(provider: AIProvider, requested?: string): string {
+  if (!requested || RETIRED_MODELS.has(requested)) return PROVIDER_MODELS[provider].defaultModel;
+  return requested;
+}
 
-  const approaches = rawApproaches.map((app: any, idx: number) => {
-    const tier =
-      app.tier === 'optimal' || app.tier === 'better' || app.tier === 'brute-force'
+// ─────────────────────────────────────────────
+// Sanitizers
+// ─────────────────────────────────────────────
+
+export function sanitizeThinkingGuideData(raw: any): ThinkingGuideData {
+  if (!raw || typeof raw !== 'object') throw new UserError('The AI answer was not in the expected format. Please click Regenerate.');
+
+  const approaches: ProblemApproach[] = (Array.isArray(raw.approaches) ? raw.approaches : [])
+    .filter((a: any) => a && typeof a === 'object')
+    .map((app: any, idx: number, all: any[]) => {
+      const tier: ProblemApproach['tier'] = ['brute-force', 'better', 'optimal'].includes(app.tier)
         ? app.tier
         : idx === 0
         ? 'brute-force'
-        : idx === rawApproaches.length - 1
+        : idx === all.length - 1
         ? 'optimal'
         : 'better';
+      return {
+        approachName: str(app.approachName) || `Approach ${idx + 1}`,
+        tier,
+        timeComplexity: str(app.timeComplexity),
+        spaceComplexity: str(app.spaceComplexity),
+        intuition: str(app.intuition),
+        stepByStepAlgorithm: toArrayOfStrings(app.stepByStepAlgorithm),
+        pseudocodeOrSnippet: typeof app.pseudocodeOrSnippet === 'string' ? app.pseudocodeOrSnippet.replace(/^\n+|\s+$/g, '') : '',
+        tradeoffsAndDrawbacks: str(app.tradeoffsAndDrawbacks),
+      };
+    })
+    .filter((a: ProblemApproach) => a.intuition || a.stepByStepAlgorithm.length > 0);
 
-    const steps = toArrayOfStrings(app.stepByStepAlgorithm);
-    if (steps.length === 0) {
-      steps.push('Initialize required variables, structures, and bounds.');
-      steps.push('Traverse elements maintaining problem invariants.');
-      steps.push('Format and return target result.');
-    }
+  if (approaches.length === 0) {
+    throw new UserError('The AI answer was missing the solution approaches. Please click Regenerate.');
+  }
 
-    return {
-      approachName: typeof app.approachName === 'string' && app.approachName.trim() ? app.approachName : `Approach ${idx + 1}`,
-      tier,
-      timeComplexity: typeof app.timeComplexity === 'string' && app.timeComplexity.trim() ? app.timeComplexity : 'O(N)',
-      spaceComplexity: typeof app.spaceComplexity === 'string' && app.spaceComplexity.trim() ? app.spaceComplexity : 'O(1)',
-      intuition: typeof app.intuition === 'string' && app.intuition.trim() ? app.intuition : 'Core algorithmic intuition.',
-      stepByStepAlgorithm: steps,
-      pseudocodeOrSnippet: typeof app.pseudocodeOrSnippet === 'string' ? app.pseudocodeOrSnippet : '',
-      tradeoffsAndDrawbacks:
-        typeof app.tradeoffsAndDrawbacks === 'string' && app.tradeoffsAndDrawbacks.trim()
-          ? app.tradeoffsAndDrawbacks
-          : 'Analyzed for computational scalability.',
-    };
-  });
+  const recognizedPatterns = (Array.isArray(raw.recognizedPatterns) ? raw.recognizedPatterns : [])
+    .map((p: any) =>
+      typeof p === 'string'
+        ? { patternName: p.trim(), whyThisPattern: '' }
+        : { patternName: str(p?.patternName), whyThisPattern: str(p?.whyThisPattern) }
+    )
+    .filter((p: { patternName: string }) => p.patternName);
 
-  // Handle implementationBlueprint
-  let implementationBlueprint: ThinkingGuideData['implementationBlueprint'] = undefined;
-  if (raw.implementationBlueprint && typeof raw.implementationBlueprint === 'object') {
-    const ds = toArrayOfStrings(raw.implementationBlueprint.dataStructuresNeeded);
-    const algo = toArrayOfStrings(raw.implementationBlueprint.algorithmSteps);
+  let implementationBlueprint: ThinkingGuideData['implementationBlueprint'];
+  const bp = raw.implementationBlueprint;
+  if (bp && typeof bp === 'object') {
     implementationBlueprint = {
-      dataStructuresNeeded: ds.length > 0 ? ds : [`Standard library collections suitable for ${lang}`],
-      algorithmSteps:
-        algo.length > 0
-          ? algo
-          : ['1. Initialize pointers/structures', '2. Process input sequence', '3. Return computed result'],
-      starterCodeTemplate:
-        typeof raw.implementationBlueprint.starterCodeTemplate === 'string'
-          ? raw.implementationBlueprint.starterCodeTemplate
-          : `// Solution scaffold in ${lang}\n`,
+      dataStructuresNeeded: toArrayOfStrings(bp.dataStructuresNeeded),
+      algorithmSteps: toArrayOfStrings(bp.algorithmSteps),
+      starterCodeTemplate: typeof bp.starterCodeTemplate === 'string' ? bp.starterCodeTemplate.replace(/^\n+/, '') : '',
     };
   }
 
-  // Handle edgeCases
-  const edgeCases = toArrayOfStrings(raw.edgeCases);
-  if (edgeCases.length === 0) {
-    edgeCases.push('Empty or minimal input collection boundary');
-    edgeCases.push('All elements identical or duplicate values');
-    edgeCases.push('Extreme upper constraints and integer bounds');
-  }
-
-  // Handle hints
-  let hints: ThinkingGuideData['hints'] = [];
-  if (Array.isArray(raw.hints) && raw.hints.length > 0) {
-    hints = raw.hints.map((h: any, i: number) => ({
-      level: typeof h?.level === 'number' ? h.level : i + 1,
-      title: typeof h?.title === 'string' && h.title.trim() ? h.title : `Level ${i + 1} Hint`,
-      content:
-        typeof h?.content === 'string' && h.content.trim()
-          ? h.content
-          : 'Consider how the problem can be broken into smaller subproblems.',
-      revealed: Boolean(h?.revealed),
+  const hints = (Array.isArray(raw.hints) ? raw.hints : [])
+    .filter((h: any) => str(h?.content))
+    // Number after filtering, so levels are always 1..n in order, whatever the model sent.
+    .map((h: any, i: number) => ({
+      level: i + 1,
+      title: cleanListItem(str(h?.title).replace(/^level\s*\d+\s*[:.-]\s*/i, '')) || `Hint ${i + 1}`,
+      content: str(h.content),
     }));
-  } else {
-    hints = [
-      {
-        level: 1,
-        title: 'Level 1: Directional Nudge',
-        content: 'Identify what repetitive work a naive solution does that can be cached or skipped.',
-        revealed: true,
-      },
-      {
-        level: 2,
-        title: 'Level 2: Data Structure Guidance',
-        content: 'Consider which data structure allows O(1) or O(log N) state maintenance for this pattern.',
-        revealed: false,
-      },
-      {
-        level: 3,
-        title: 'Level 3: Algorithmic Invariants',
-        content: 'Formulate the condition that must remain true at every iteration of your main loop.',
-        revealed: false,
-      },
-      {
-        level: 4,
-        title: 'Level 4: Implementation Blueprint',
-        content: 'Trace border conditions and boundary updates before moving inward.',
-        revealed: false,
-      },
-    ];
-  }
 
   return {
-    simplifiedProblem,
-    coreConstraints,
+    simplifiedProblem: str(raw.simplifiedProblem),
+    coreConstraints: toArrayOfStrings(raw.coreConstraints),
     recognizedPatterns,
     approaches,
-    bruteForce: {
-      approach: typeof raw.bruteForce?.approach === 'string' ? raw.bruteForce.approach : approaches[0].intuition,
-      timeComplexity: typeof raw.bruteForce?.timeComplexity === 'string' ? raw.bruteForce.timeComplexity : approaches[0].timeComplexity,
-      spaceComplexity: typeof raw.bruteForce?.spaceComplexity === 'string' ? raw.bruteForce.spaceComplexity : approaches[0].spaceComplexity,
-      drawback: typeof raw.bruteForce?.drawback === 'string' ? raw.bruteForce.drawback : approaches[0].tradeoffsAndDrawbacks,
-    },
-    optimizedApproach: {
-      approach: typeof raw.optimizedApproach?.approach === 'string' ? raw.optimizedApproach.approach : approaches[approaches.length - 1].intuition,
-      timeComplexity: typeof raw.optimizedApproach?.timeComplexity === 'string' ? raw.optimizedApproach.timeComplexity : approaches[approaches.length - 1].timeComplexity,
-      spaceComplexity: typeof raw.optimizedApproach?.spaceComplexity === 'string' ? raw.optimizedApproach.spaceComplexity : approaches[approaches.length - 1].spaceComplexity,
-      keyIntuition: typeof raw.optimizedApproach?.keyIntuition === 'string' ? raw.optimizedApproach.keyIntuition : approaches[approaches.length - 1].intuition,
-    },
     implementationBlueprint,
-    edgeCases,
+    edgeCases: toArrayOfStrings(raw.edgeCases),
     hints,
   };
 }
 
-/**
- * Robust sanitizer that guarantees 100% schema integrity for InterviewScriptData.
- */
-export function sanitizeInterviewScriptData(raw: any, lang: string = 'Python'): InterviewScriptData {
-  if (!raw || typeof raw !== 'object') {
-    throw new Error('Invalid interview script data received.');
-  }
+export function sanitizeInterviewScriptData(raw: any): InterviewScriptData {
+  if (!raw || typeof raw !== 'object') throw new UserError('The AI answer was not in the expected format. Please click Regenerate.');
 
-  const problemSummary =
-    typeof raw.problemSummary === 'string' && raw.problemSummary.trim()
-      ? raw.problemSummary.trim()
-      : 'Here is a complete verbal interview walkthrough solving the problem methodically.';
-
-  let sections: InterviewScriptData['sections'] = [];
-  if (Array.isArray(raw.sections) && raw.sections.length > 0) {
-    sections = raw.sections.map((s: any, idx: number) => ({
-      id: typeof s?.id === 'string' && s.id.trim() ? s.id : `section-${idx}`,
-      phase: typeof s?.phase === 'string' && s.phase.trim() ? s.phase : `Stage ${idx + 1}`,
-      speakingScript:
-        typeof s?.speakingScript === 'string' && s.speakingScript.trim()
-          ? s.speakingScript
-          : 'Explaining the algorithmic logic clearly to the interviewer...',
-      interviewerReactionHint:
-        typeof s?.interviewerReactionHint === 'string' && s.interviewerReactionHint.trim()
-          ? s.interviewerReactionHint
-          : 'Interviewer evaluates proactive verbal communication.',
+  const sections = (Array.isArray(raw.sections) ? raw.sections : [])
+    .map((s: any, idx: number) => ({
+      id: `section-${idx}`, // model-supplied ids can collide; index ids are always unique
+      phase: cleanListItem(str(s?.phase)) || `Stage ${idx + 1}`,
+      speakingScript: str(s?.speakingScript),
+      interviewerReactionHint: str(s?.interviewerReactionHint).replace(/^interviewer signal:\s*/i, ''),
       keyPoints: toArrayOfStrings(s?.keyPoints),
-    }));
+    }))
+    .filter((s: { speakingScript: string }) => s.speakingScript);
+
+  if (sections.length === 0) {
+    throw new UserError('The AI answer was missing the script. Please click Regenerate.');
   }
-
-  const timeComplexityExplanation =
-    typeof raw.timeComplexityExplanation === 'string' && raw.timeComplexityExplanation.trim()
-      ? raw.timeComplexityExplanation
-      : 'The time complexity is bounded by input traversal and structure operations.';
-
-  const spaceComplexityExplanation =
-    typeof raw.spaceComplexityExplanation === 'string' && raw.spaceComplexityExplanation.trim()
-      ? raw.spaceComplexityExplanation
-      : 'The auxiliary space complexity is determined by the extra storage allocated.';
-
-  const proTips = toArrayOfStrings(raw.proTips);
 
   return {
-    problemSummary,
+    problemSummary: str(raw.problemSummary),
     sections,
-    timeComplexityExplanation,
-    spaceComplexityExplanation,
-    proTips,
+    timeComplexityExplanation: str(raw.timeComplexityExplanation),
+    spaceComplexityExplanation: str(raw.spaceComplexityExplanation),
+    proTips: toArrayOfStrings(raw.proTips),
   };
 }
 
+export function sanitizeCodeCheckResult(raw: any, originalCode: string): CodeCheckResult {
+  if (!raw || typeof raw !== 'object') throw new UserError('The AI answer was not in the expected format. Please try Check & Fix again.');
+
+  const bugs: CodeCheckBug[] = (Array.isArray(raw.bugs) ? raw.bugs : [])
+    .filter((b: any) => b && typeof b === 'object')
+    .map((b: any, i: number) => ({
+      lineNumber: Number.isInteger(b.lineNumber) && b.lineNumber > 0 ? b.lineNumber : undefined,
+      issueType: ['syntax', 'runtime', 'logic', 'edge-case', 'complexity'].includes(b.issueType) ? b.issueType : 'logic',
+      title: str(b.title) || `Issue ${i + 1}`,
+      explanation: str(b.explanation),
+      problematicSnippet: str(b.problematicSnippet) || undefined,
+      fixedSnippet: str(b.fixedSnippet) || undefined,
+    }));
+
+  // Status must agree with the bug list; models sometimes say "clean" while listing bugs.
+  const status: CodeCheckResult['status'] = bugs.length > 0 ? 'issues_found' : 'clean';
+
+  const fixed = typeof raw.fixedFullCode === 'string' ? raw.fixedFullCode.replace(/^\n+|\s+$/g, '') : '';
+  const score = typeof raw.overallScore === 'number' && Number.isFinite(raw.overallScore)
+    ? Math.max(0, Math.min(100, Math.round(raw.overallScore)))
+    : null;
+
+  return {
+    status,
+    summary: str(raw.summary) || (status === 'clean' ? 'No problems found.' : `Found ${bugs.length} issue(s).`),
+    overallScore: score,
+    timeComplexity: str(raw.timeComplexity),
+    spaceComplexity: str(raw.spaceComplexity),
+    bugs,
+    // Empty string = "no change suggested". The UI hides "Apply Fix" in that case.
+    fixedFullCode: fixed && fixed.trim() !== originalCode.trim() ? fixed : '',
+    learningAdvice: str(raw.learningAdvice),
+  };
+}
+
+// ─────────────────────────────────────────────
+// Provider dispatcher
+// ─────────────────────────────────────────────
+
+const MAX_RETRY_WAIT_S = 12;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Groq rate limits are per model, so on a long wait we can switch to the sibling model. */
+const GROQ_SIBLING: Record<string, string> = {
+  'openai/gpt-oss-20b': 'openai/gpt-oss-120b',
+  'openai/gpt-oss-120b': 'openai/gpt-oss-20b',
+};
+
+/** Seconds to wait before retrying a 429, from the Retry-After header or "try again in 7.8s" text. */
+function retryDelaySeconds(res: Response, message: string): number | null {
+  const header = Number(res.headers.get('retry-after'));
+  if (Number.isFinite(header) && header > 0) return header;
+  const m = message.match(/try again in\s+(?:(\d+)m)?([\d.]+)s/i) || message.match(/retry in\s+([\d.]+)s/i);
+  if (!m) return null;
+  return m.length === 3 ? Number(m[1] || 0) * 60 + Number(m[2]) : Number(m[1]);
+}
+
 /**
- * Standardized LLM completions dispatcher across Gemini, Groq, and OpenAI
+ * Groq / OpenAI chat completions with two recoveries:
+ *  - JSON mode rejected the model's output (Groq "json_validate_failed"): use the
+ *    returned `failed_generation`, which the lenient parser can usually repair; else retry without JSON mode.
+ *  - Rate limited (429): wait if it is short, or (Groq) switch to the sibling model with its own limit.
  */
+async function callOpenAICompatible(provider: 'groq' | 'openai', apiKey: string, firstModel: string, prompt: string, systemInstruction: string): Promise<string> {
+  const url = provider === 'groq' ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.openai.com/v1/chat/completions';
+  let model = firstModel;
+  let jsonMode = true;
+
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: 'system', content: systemInstruction },
+          { role: 'user', content: prompt },
+        ],
+        ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
+        temperature: 0.3,
+        // Reasoning models (GPT-OSS) spend output tokens on hidden reasoning first; Groq's
+        // default 2048-token cap could leave nothing for the answer. Low effort also keeps
+        // us well inside Groq's tokens-per-minute limit.
+        max_completion_tokens: 8192,
+        ...(model.startsWith('openai/gpt-oss') ? { reasoning_effort: 'low', include_reasoning: false } : {}),
+      }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      const choice = data.choices?.[0];
+      const content = choice?.message?.content || '';
+      if (!content && choice?.finish_reason === 'length') {
+        console.warn(`[AI] ${model} ran out of output tokens before answering`);
+        throw new UserError('The AI answer was cut off. Please click Regenerate.');
+      }
+      return content;
+    }
+
+    const errBody = await response.json().catch(() => ({}));
+    const err = errBody.error || {};
+    const message = String(err.message || '');
+
+    if (response.status === 400 && err.code === 'json_validate_failed') {
+      if (typeof err.failed_generation === 'string' && err.failed_generation.includes('{')) return err.failed_generation;
+      jsonMode = false;
+      continue;
+    }
+
+    if (response.status === 429 && attempt < 3) {
+      // Switching to the sibling model is instant (separate limit), so try it before waiting.
+      if (provider === 'groq' && GROQ_SIBLING[model] && model === firstModel) {
+        model = GROQ_SIBLING[model];
+        continue;
+      }
+      const wait = retryDelaySeconds(response, message);
+      if (wait !== null && wait <= MAX_RETRY_WAIT_S) {
+        await sleep(wait * 1000 + 250);
+        continue;
+      }
+    }
+
+    throw new ProviderError(provider, response.status, message);
+  }
+  throw new ProviderError(provider, 429, 'retries exhausted');
+}
+
 async function callLLM(prompt: string, systemInstruction: string, options: GenerationOptions): Promise<string> {
   const provider = options.provider || 'gemini';
   const apiKey =
     options.apiKey ||
-    (provider === 'groq' ? process.env.GROQ_API_KEY : null) ||
-    (provider === 'gemini' ? (process.env.GEMINI_API_KEY || process.env.MASTER_GEMINI_API_KEY) : null) ||
-    (provider === 'openai' ? process.env.OPENAI_API_KEY : null);
+    (provider === 'gemini' ? process.env.GEMINI_API_KEY : provider === 'groq' ? process.env.GROQ_API_KEY : process.env.OPENAI_API_KEY);
 
   if (!apiKey) {
-    throw new Error(
-      `API key not found for provider "${provider.toUpperCase()}". Please configure your key in Settings.`
-    );
+    throw new UserError('No API key is set for this AI provider. Add your key in Settings.');
   }
 
-  // 1. GROQ PROVIDER
-  if (provider === 'groq') {
-    const model = options.model || 'openai/gpt-oss-20b';
-    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+  const model = resolveModel(provider, options.model);
+
+  if (provider === 'groq' || provider === 'openai') {
+    return callOpenAICompatible(provider, apiKey, model, prompt, systemInstruction);
+  }
+
+  // Google Gemini (REST; the old @google/generative-ai SDK is deprecated).
+  // Native JSON mode makes parse failures far less likely.
+  const send = () =>
+    fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
+      headers: { 'x-goog-api-key': apiKey, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model,
-        messages: [
-          { role: 'system', content: systemInstruction },
-          { role: 'user', content: prompt },
-        ],
-        response_format: { type: 'json_object' },
-        temperature: 0.2,
+        systemInstruction: { parts: [{ text: systemInstruction }] },
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: { responseMimeType: 'application/json', temperature: 0.3 },
       }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
 
-    if (!response.ok) {
-      const errBody = await response.json().catch(() => ({}));
-      throw new Error(errBody.error?.message || `Groq API request failed with status ${response.status}`);
-    }
-
-    const data = await response.json();
-    return data.choices?.[0]?.message?.content || '{}';
+  let response = await send();
+  if (response.status === 429) {
+    const errBody = await response.json().catch(() => ({}));
+    const wait = retryDelaySeconds(response, String(errBody.error?.message || ''));
+    if (wait === null || wait > MAX_RETRY_WAIT_S) throw new ProviderError('gemini', 429, String(errBody.error?.message || ''));
+    await sleep(wait * 1000 + 250);
+    response = await send();
   }
-
-  // 2. OPENAI PROVIDER
-  if (provider === 'openai') {
-    const model = options.model || 'gpt-4o-mini';
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: 'system', content: systemInstruction },
-          { role: 'user', content: prompt },
-        ],
-        response_format: { type: 'json_object' },
-        temperature: 0.2,
-      }),
-    });
-
-    if (!response.ok) {
-      const errBody = await response.json().catch(() => ({}));
-      throw new Error(errBody.error?.message || `OpenAI API request failed with status ${response.status}`);
-    }
-
-    const data = await response.json();
-    return data.choices?.[0]?.message?.content || '{}';
+  if (!response.ok) {
+    const errBody = await response.json().catch(() => ({}));
+    throw new ProviderError('gemini', response.status, String(errBody.error?.message || ''));
   }
-
-  // 3. GOOGLE GEMINI PROVIDER (Default)
-  const modelName = options.model || 'gemini-1.5-flash';
-  const genAI = new GoogleGenerativeAI(apiKey);
-  const geminiModel = genAI.getGenerativeModel({ model: modelName });
-
-  const combinedPrompt = `${systemInstruction}\n\nTask and Input:\n${prompt}`;
-  const result = await geminiModel.generateContent(combinedPrompt);
-  return result.response.text();
+  const data = await response.json();
+  const candidate = data.candidates?.[0];
+  if (!candidate) {
+    throw new UserError(data.promptFeedback?.blockReason ? 'The AI declined to answer this request. Try rephrasing the problem.' : 'The AI returned an empty answer. Please click Regenerate.');
+  }
+  if (candidate.finishReason === 'MAX_TOKENS') {
+    throw new UserError('The AI answer was cut off. Please click Regenerate.');
+  }
+  return (candidate.content?.parts || []).map((p: { text?: string }) => p.text || '').join('');
 }
 
-/**
- * FEATURE A: Thinking Guide Generator
- */
+function assertLength(problemText: string, code?: string) {
+  if (problemText.length > MAX_PROBLEM_LENGTH) {
+    throw new UserError(`The problem text is too long (limit: ${MAX_PROBLEM_LENGTH.toLocaleString()} characters).`);
+  }
+  if (code && code.length > MAX_CODE_LENGTH) {
+    throw new UserError(`The code is too long (limit: ${MAX_CODE_LENGTH.toLocaleString()} characters).`);
+  }
+}
+
+// ─────────────────────────────────────────────
+// Feature A: Thinking Guide ("Kaise Sochna Hai")
+// ─────────────────────────────────────────────
+
 export async function generateThinkingGuide(
   problemText: string,
   codeSnippet?: string,
-  options: GenerationOptions & { language?: string } = {}
+  options: GenerationOptions = {}
 ): Promise<ThinkingGuideData> {
-  if (problemText.length > MAX_INPUT_LENGTH) {
-    throw new Error(`Problem text is too long (limit: ${MAX_INPUT_LENGTH} characters).`);
-  }
+  assertLength(problemText, codeSnippet);
+  const lang = languageLabel(options.language);
+  const c = commentPrefix(options.language);
 
-  const lang = options.language || 'Python';
+  const starterRule =
+    options.language === 'python' || !options.language
+      ? `A runnable Python 3 scaffold: the function signature with a docstring and \`pass\` (or ${c} TODO comments) for the body, followed by a small sample call that prints the result, so it can be traced line by line. Use only ${c} comments.`
+      : `A compile-ready ${lang} scaffold: class/method signature with ${c} TODO comments in the body, plus a main function that calls it with the sample input and prints the result. Use only ${c} comments.`;
 
-  const systemInstruction = `
-You are AlgoBuddy, an elite technical interview mentor and DSA coach.
-Your mission is not to give away answers, but to train the user to decompose problems methodically and logically.
-The candidate is practicing in programming language: ${lang}.
-Provide in-depth algorithmic pattern analysis, multiple progressive solution approaches (Brute Force -> Better/Intermediate -> Most Optimal), time/space trade-offs, and an actionable implementation blueprint suited for ${lang}.
-You must respond strictly with valid, unescaped JSON matching the requested schema.
-`;
+  const systemInstruction = `You are AlgoBuddy, a patient DSA mentor who teaches students HOW to think, not just the answer.
+The student codes in ${lang}. Explain like a senior engineer mentoring a junior: concrete, specific to THIS problem, no generic filler.
+Respond with valid JSON only.
+${FORMAT_RULES}`;
 
-  const prompt = `
-Problem Description:
+  const prompt = `Problem:
 """
 ${problemText}
 """
-
-${codeSnippet ? `Candidate's existing code (if any):\n"""\n${codeSnippet}\n"""` : ''}
-
-Generate structured problem decomposition with multiple approaches and an implementation bridge in the following exact JSON format:
+${codeSnippet ? `\nThe student's current code (use it to tailor hints, but do not just fix it):\n"""\n${codeSnippet}\n"""\n` : ''}
+Return JSON with exactly these keys:
 {
-  "simplifiedProblem": "Clear, comprehensive restatement of the problem in plain English, explaining what is given and what must be returned.",
-  "coreConstraints": [
-    "Constraint 1 and its direct algorithmic deduction (e.g. N <= 10^5 implies O(N) or O(N log N) is required)",
-    "Constraint 2 and memory/overflow implications (e.g. integer bounds, 32-bit vs 64-bit)"
-  ],
-  "recognizedPatterns": [
-    {
-      "patternName": "Primary Pattern (e.g., Two Pointers, Monotonic Stack, Sliding Window, DP, Prefix Sum)",
-      "whyThisPattern": "Deep explanation of why this specific problem structure demands this pattern over others"
-    }
-  ],
+  "simplifiedProblem": "2-3 sentences: what is given, what must be returned, in plain language.",
+  "coreConstraints": ["Each item: one constraint and what it implies, e.g. \`n <= 10^5\` means we need O(n) or O(n log n)."],
+  "recognizedPatterns": [{ "patternName": "Short name, e.g. Sliding Window", "whyThisPattern": "1-2 sentences: which clue in THIS problem points to it." }],
   "approaches": [
     {
-      "approachName": "Approach 1: Naive Brute Force",
-      "tier": "brute-force",
+      "approachName": "Short name, e.g. Brute Force: check every pair",
+      "tier": "brute-force | better | optimal",
       "timeComplexity": "O(...)",
       "spaceComplexity": "O(...)",
-      "intuition": "The straightforward brute force idea that anyone can come up with first.",
-      "stepByStepAlgorithm": [
-        "Step 1: Iterate through ...",
-        "Step 2: Check condition ...",
-        "Step 3: Return result or fallback"
-      ],
-      "pseudocodeOrSnippet": "// Short 3-5 line logic or pseudocode in ${lang}",
-      "tradeoffsAndDrawbacks": "Why this approach is computationally unacceptable or exceeds time limits (TLE)."
-    },
-    {
-      "approachName": "Approach 2: Better / Intermediate Optimization",
-      "tier": "better",
-      "timeComplexity": "O(...)",
-      "spaceComplexity": "O(...)",
-      "intuition": "Intermediate optimization (e.g. using sorting, binary search, or two pointers) that improves runtime but might still have a tradeoff.",
-      "stepByStepAlgorithm": [
-        "Step 1: Pre-process or sort ...",
-        "Step 2: Use two pointers / binary search ...",
-        "Step 3: Collect result"
-      ],
-      "pseudocodeOrSnippet": "// Short 3-5 line logic or pseudocode in ${lang}",
-      "tradeoffsAndDrawbacks": "How this improves over brute-force and what tradeoffs (like sorting cost O(N log N)) remain."
-    },
-    {
-      "approachName": "Approach 3: Optimal (Production-Grade)",
-      "tier": "optimal",
-      "timeComplexity": "O(...)",
-      "spaceComplexity": "O(...)",
-      "intuition": "The central mathematical, hash-based, or structural insight that unlocks maximum efficiency.",
-      "stepByStepAlgorithm": [
-        "Step 1: Initialize optimal auxiliary structure ...",
-        "Step 2: Single pass traversal maintaining invariants ...",
-        "Step 3: Constant-time state lookups and transitions ...",
-        "Step 4: Return final optimal result"
-      ],
-      "pseudocodeOrSnippet": "// Short 4-7 line optimal logic in ${lang}",
-      "tradeoffsAndDrawbacks": "Tradeoffs (e.g. trades O(N) extra space for O(N) linear time)."
+      "intuition": "2-3 sentences: the idea behind it.",
+      "stepByStepAlgorithm": ["3-6 items, one action each"],
+      "pseudocodeOrSnippet": "4-10 lines of real ${lang} code (comments use ${c}).",
+      "tradeoffsAndDrawbacks": "1-2 sentences: why it is too slow, or what it trades."
     }
   ],
-  "bruteForce": {
-    "approach": "Summary of brute force solution",
-    "timeComplexity": "O(...)",
-    "spaceComplexity": "O(...)",
-    "drawback": "Why this exceeds time limits"
-  },
-  "optimizedApproach": {
-    "approach": "Summary of optimal algorithmic strategy",
-    "timeComplexity": "O(...)",
-    "spaceComplexity": "O(...)",
-    "keyIntuition": "The central mathematical or structural insight"
-  },
   "implementationBlueprint": {
-    "dataStructuresNeeded": ["Data structure 1 (e.g. HashMap for O(1) complements)", "Data structure 2"],
-    "algorithmSteps": [
-      "1. Edge check: handle empty or small inputs",
-      "2. State tracking: initialize variables/pointers",
-      "3. Core loop: process elements sequentially",
-      "4. Post-processing: format and return answer"
-    ],
-    "starterCodeTemplate": "// Clean starter code scaffold with method signature in ${lang}"
+    "dataStructuresNeeded": ["Structure and why, e.g. \`HashMap<Integer,Integer>\` to look up complements in O(1)"],
+    "algorithmSteps": ["4-6 coding actions in order, for the optimal approach"],
+    "starterCodeTemplate": "${starterRule}"
   },
-  "edgeCases": [
-    "Edge case 1: Empty or single element collection -> return expected boundary value",
-    "Edge case 2: Duplicate elements or all identical values",
-    "Edge case 3: Negative numbers or maximum integer overflow boundary"
-  ],
+  "edgeCases": ["Each item: the input and the expected behaviour, e.g. empty array returns \`[]\`."],
   "hints": [
-    {
-      "level": 1,
-      "title": "Level 1: Directional Nudge",
-      "content": "A high-level thinking prompt without revealing data structures or formulas",
-      "revealed": false
-    },
-    {
-      "level": 2,
-      "title": "Level 2: Data Structure Guidance",
-      "content": "Suggesting the appropriate data structure or algorithmic paradigm",
-      "revealed": false
-    },
-    {
-      "level": 3,
-      "title": "Level 3: Algorithmic Blueprint",
-      "content": "Step-by-step execution logic and pointer management rules",
-      "revealed": false
-    },
-    {
-      "level": 4,
-      "title": "Level 4: Comprehensive Strategy",
-      "content": "Full structural walkthrough prior to code implementation",
-      "revealed": false
-    }
+    { "title": "Nudge", "content": "A question that points the student in the right direction without naming the data structure." },
+    { "title": "Direction", "content": "Name the pattern or data structure to use." },
+    { "title": "Blueprint", "content": "The key invariant or state to maintain." },
+    { "title": "Full strategy", "content": "The whole plan in 3-4 sentences, without code." }
   ]
 }
-`;
+Give 2 or 3 approaches ordered from brute force to optimal (skip "better" if there is no meaningful middle step). Exactly 4 hints.`;
 
   const raw = await callLLM(prompt, systemInstruction, options);
-  const parsed = extractAndParseJSON<any>(raw);
-  return sanitizeThinkingGuideData(parsed, lang);
+  return sanitizeThinkingGuideData(extractAndParseJSON(raw));
 }
 
-/**
- * FEATURE C: Interview Script Generator
- */
+// ─────────────────────────────────────────────
+// Feature B: Interview script
+// ─────────────────────────────────────────────
+
 export async function generateInterviewScript(
   problemText: string,
   codeSnippet: string = '',
-  options: GenerationOptions & { language?: string } = {}
+  options: GenerationOptions = {}
 ): Promise<InterviewScriptData> {
-  if (problemText.length > MAX_INPUT_LENGTH) {
-    throw new Error(`Problem text is too long (limit: ${MAX_INPUT_LENGTH} characters).`);
-  }
+  assertLength(problemText, codeSnippet);
+  const lang = languageLabel(options.language);
 
-  const lang = options.language || 'Python';
+  const systemInstruction = `You are AlgoBuddy, an interview coach. Write what the CANDIDATE should say out loud, in first person, during a ${lang} coding interview.
+Sound like a calm, confident human, not a textbook. Use short spoken sentences, concrete numbers from one sample input, and real variable names.
+Respond with valid JSON only.
+${FORMAT_RULES}`;
 
-  const systemInstruction = `
-You are AlgoBuddy, an elite FAANG software engineering interview coach.
-The candidate is interviewing in programming language: ${lang}.
-Transform the problem (and optional code) into a realistic, natural, word-for-word spoken dialogue that a candidate should verbally present during a real senior-level technical interview.
-Do NOT give brief or shallow 1-sentence summaries. Each speakingScript MUST be a thorough, conversational, professional spoken explanation (3 to 6 detailed sentences per section) using concrete variable names, numbers from a sample test case, and clear verbal transitions.
-If the candidate has not provided code, derive the optimal algorithmic solution in ${lang} and produce the full dialogue explaining that solution out loud.
-You must respond strictly with valid, unescaped JSON.
-`;
-
-  const prompt = `
-Problem:
+  const prompt = `Problem:
 """
 ${problemText}
 """
 
-${codeSnippet ? `Candidate's Code:\n"""\n${codeSnippet}\n"""` : 'No code provided yet. Generate the spoken script as a candidate solving the problem from scratch with optimal solution.'}
+${codeSnippet ? `Candidate's code:\n"""\n${codeSnippet}\n"""` : `No code yet. Assume the candidate will write the optimal ${lang} solution and narrate it.`}
 
-Return detailed, word-for-word verbal script matching this JSON schema:
+Return JSON with exactly these keys:
 {
-  "problemSummary": "2-3 sentence spoken recap confirming understanding to the interviewer, clarifying input types and output requirements.",
+  "problemSummary": "2 sentences the candidate says to confirm understanding.",
   "sections": [
-    {
-      "id": "clarifying-questions",
-      "phase": "1. Clarifying Questions to Ask",
-      "speakingScript": "Realistic 3-5 sentence spoken script where the candidate asks clarifying questions about constraints, duplicate values, memory limits, and empty inputs.",
-      "interviewerReactionHint": "Interviewer signal: Confirms candidate communicates proactively before jumping into code.",
-      "keyPoints": ["Confirm input bounds & constraints", "Ask about duplicate or negative values", "Verify expected return behavior for edge cases"]
-    },
-    {
-      "id": "example-walkthrough",
-      "phase": "2. Example Walkthrough on Whiteboard",
-      "speakingScript": "Step-by-step 4-6 sentence spoken walkthrough using a concrete example, verbally tracing inputs, intermediate pointer/variable changes, and expected output.",
-      "interviewerReactionHint": "Interviewer signal: Confirms candidate validates their mental model before implementation.",
-      "keyPoints": ["Walk through a realistic concrete sample", "Highlight how pointers or state evolve", "Verify boundary output"]
-    },
-    {
-      "id": "brute-force-to-optimal",
-      "phase": "3. Brute Force to Optimized Transition",
-      "speakingScript": "Polished verbal transition acknowledging the naive brute force (e.g. O(N^2) nested loops), explaining where the bottleneck lies, and proposing the optimal approach with the core insight.",
-      "interviewerReactionHint": "Interviewer signal: Demonstrates trade-off analysis, complexity awareness, and algorithmic maturity.",
-      "keyPoints": ["Acknowledge naive baseline complexity", "Pinpoint computational bottleneck", "Pivot to optimal using key insight"]
-    },
-    {
-      "id": "code-explanation",
-      "phase": "4. Step-by-Step Code Walkthrough",
-      "speakingScript": "Clear, professional spoken walkthrough of the solution code, explaining the role of each variable, loop invariants, state transitions, and return statements in ${lang}.",
-      "interviewerReactionHint": "Interviewer signal: Proves the candidate can communicate clearly while writing production-grade code.",
-      "keyPoints": ["Data structure initialization", "Loop invariant & pointer progression", "Safe termination & return"]
-    },
-    {
-      "id": "closing-summary",
-      "phase": "5. Complexity & Wrap-Up",
-      "speakingScript": "Formal closing summary stating exact asymptotic Time and Space complexities, justifying why each loop or data structure contributes to the bound, and inviting questions.",
-      "interviewerReactionHint": "Interviewer signal: Concludes with rigorous mathematical precision.",
-      "keyPoints": ["Time Complexity O(...)", "Space Complexity O(...)", "Interviewer sign-off question"]
-    }
+    { "phase": "Clarifying questions", "speakingScript": "3-5 spoken sentences asking about input size, duplicates, negatives, empty input, return format.", "interviewerReactionHint": "One sentence: what the interviewer is evaluating here.", "keyPoints": ["2-4 short phrases"] },
+    { "phase": "Example walkthrough", "speakingScript": "4-6 sentences tracing one concrete sample input by hand.", "interviewerReactionHint": "...", "keyPoints": ["..."] },
+    { "phase": "Brute force to optimal", "speakingScript": "4-6 sentences: naive idea and its cost, the bottleneck, the key insight, the optimal idea.", "interviewerReactionHint": "...", "keyPoints": ["..."] },
+    { "phase": "Code walkthrough", "speakingScript": "4-6 sentences explaining the code top to bottom while writing it.", "interviewerReactionHint": "...", "keyPoints": ["..."] },
+    { "phase": "Testing and complexity", "speakingScript": "3-5 sentences: dry-run one edge case, state time and space complexity with reasons, invite questions.", "interviewerReactionHint": "...", "keyPoints": ["..."] }
   ],
-  "timeComplexityExplanation": "Spoken sentence explaining why time complexity is O(...)",
-  "spaceComplexityExplanation": "Spoken sentence explaining auxiliary memory usage",
-  "proTips": [
-    "Always pause after key transitions and ask 'Does this approach make sense before I start coding?'",
-    "Never code in complete silence for more than thirty seconds",
-    "State your assumptions out loud before writing any helper functions"
-  ]
+  "timeComplexityExplanation": "One or two spoken sentences.",
+  "spaceComplexityExplanation": "One or two spoken sentences.",
+  "proTips": ["3-4 short, specific communication tips for THIS problem"]
 }
-`;
+keyPoints are short phrases (2-6 words), not sentences.`;
+
+  const raw = await callLLM(prompt, systemInstruction, options);
+  return sanitizeInterviewScriptData(extractAndParseJSON(raw));
+}
+
+// ─────────────────────────────────────────────
+// Feature C: Explain one trace step
+// ─────────────────────────────────────────────
+
+export interface ExplainStepInput {
+  /** Full traced program (so the model sees loops/branches around the line). */
+  code: string;
+  lineNumber: number;
+  event: 'line' | 'return' | 'exception';
+  functionName: string;
+  /** How many times this line has run so far. */
+  iteration: number;
+  /** Variables right before the line runs. */
+  variablesBefore: Record<string, string>;
+  /** Variables right after it ran (same function), or null if the line called into another function / was the last step. */
+  variablesAfter: Record<string, string> | null;
+  changedVars: string[];
+  /** What happens next, e.g. "jumps to line 7" or "calls two_sum()". */
+  nextAction?: string;
+  returnValue?: string;
+}
+
+export async function explainTraceStep(
+  input: ExplainStepInput,
+  options: GenerationOptions = {}
+): Promise<{ explanation: string; whyItRan: string }> {
+  const systemInstruction = `You are AlgoBuddy's step debugger, explaining one step of a Python program to a beginner.
+Be concrete: use the real variable names and the real values given. Never describe Python syntax in general terms.
+Each field is 1-2 short sentences.
+Respond with valid JSON only.
+${FORMAT_RULES}`;
+
+  const lines = input.code.split('\n');
+  const from = Math.max(0, input.lineNumber - 40);
+  const to = Math.min(lines.length, input.lineNumber + 40);
+  const numbered = lines
+    .slice(from, to)
+    .map((l, i) => `${from + i + 1 === input.lineNumber ? '>>' : '  '} ${String(from + i + 1).padStart(3, ' ')} | ${l}`)
+    .join('\n');
+  const where = input.functionName && input.functionName !== '<module>' ? `inside \`${input.functionName}()\`` : 'in the main program';
+
+  const situation =
+    input.event === 'return'
+      ? `The function \`${input.functionName}()\` is returning \`${input.returnValue ?? 'None'}\` from line ${input.lineNumber}.`
+      : `Line ${input.lineNumber} (${where}) is about to run. This is run number ${input.iteration} of this line.`;
+
+  const prompt = `Program (>> marks the current line):
+${numbered}
+
+${situation}
+Variables before: ${JSON.stringify(input.variablesBefore).slice(0, 3000)}
+${input.variablesAfter ? `Variables after: ${JSON.stringify(input.variablesAfter).slice(0, 3000)}` : ''}
+${input.changedVars.length ? `Changed by this line: ${input.changedVars.join(', ')}` : 'No variable changes (a condition, loop check, call or print).'}
+${input.nextAction ? `Next, execution ${input.nextAction}.` : ''}
+
+Return JSON: {
+  "explanation": "What this line does right now with these exact values (e.g. compares \`7 in seen\` → False, so it skips the return).",
+  "whyItRan": "Why execution is on this line now: which loop iteration, which branch was taken, or which call led here."
+}`;
 
   const raw = await callLLM(prompt, systemInstruction, options);
   const parsed = extractAndParseJSON<any>(raw);
-  return sanitizeInterviewScriptData(parsed, lang);
+  const explanation = str(parsed?.explanation);
+  if (!explanation) throw new UserError('The AI could not explain this step. Please try again.');
+  return { explanation, whyItRan: str(parsed?.whyItRan) };
 }
 
-/**
- * FEATURE D: Single Step Trace Explainer
- */
-export async function explainTraceStep(
-  codeLine: string,
-  lineNumber: number,
-  variablesBefore: Record<string, string>,
-  variablesAfter: Record<string, string>,
-  changedVars: string[],
-  options: GenerationOptions = {}
-): Promise<{ explanation: string; whyItRan: string }> {
-  const systemInstruction = `
-You are AlgoBuddy execution trace debugger. Explain runtime state changes concisely in 2 professional English sentences.
-Respond strictly in JSON format.
-`;
-
-  const prompt = `
-Executed Line ${lineNumber}:
-\`\`\`python
-${codeLine}
-\`\`\`
-
-Variables prior to execution:
-${JSON.stringify(variablesBefore, null, 2)}
-
-Variables after execution:
-${JSON.stringify(variablesAfter, null, 2)}
-
-Modified variables:
-${changedVars.join(', ') || 'None (Conditional evaluation or loop check)'}
-
-Provide JSON:
-{
-  "explanation": "Clear explanation of data mutation or branch evaluation in this step",
-  "whyItRan": "Algorithmic reason why the program reached and executed this line"
-}
-`;
-
-  const raw = await callLLM(prompt, systemInstruction, options);
-  return extractAndParseJSON<{ explanation: string; whyItRan: string }>(raw);
-}
-
-/**
- * FEATURE E: Code Doctor & Algorithmic Debugger
- */
-export function sanitizeCodeCheckResult(
-  raw: any,
-  originalCode: string,
-  lang: string = 'Python'
-): CodeCheckResult {
-  if (!raw || typeof raw !== 'object') {
-    throw new Error('Invalid code inspection data returned.');
-  }
-
-  const status = raw.status === 'clean' ? 'clean' : 'issues_found';
-  const summary =
-    typeof raw.summary === 'string' && raw.summary.trim()
-      ? raw.summary.trim()
-      : status === 'clean'
-      ? 'Code syntax and algorithmic logic passed checks.'
-      : 'Identified potential bugs, runtime risks, or edge case oversights in the code.';
-
-  const overallScore =
-    typeof raw.overallScore === 'number' && !isNaN(raw.overallScore)
-      ? Math.max(0, Math.min(100, Math.round(raw.overallScore)))
-      : status === 'clean'
-      ? 95
-      : 65;
-
-  const timeComplexity =
-    typeof raw.timeComplexity === 'string' && raw.timeComplexity.trim() ? raw.timeComplexity.trim() : 'O(N)';
-  const spaceComplexity =
-    typeof raw.spaceComplexity === 'string' && raw.spaceComplexity.trim() ? raw.spaceComplexity.trim() : 'O(1)';
-
-  let bugs: CodeCheckBug[] = [];
-  if (Array.isArray(raw.bugs)) {
-    bugs = raw.bugs.map((b: any, i: number) => {
-      const issueType = ['syntax', 'runtime', 'logic', 'edge-case', 'complexity'].includes(b?.issueType)
-        ? b.issueType
-        : 'logic';
-
-      return {
-        lineNumber: typeof b?.lineNumber === 'number' ? b.lineNumber : undefined,
-        issueType,
-        title: typeof b?.title === 'string' && b.title.trim() ? b.title.trim() : `Issue ${i + 1}`,
-        explanation:
-          typeof b?.explanation === 'string' && b.explanation.trim()
-            ? b.explanation.trim()
-            : 'Potential logic defect, off-by-one check, or unhandled edge case.',
-        problematicSnippet:
-          typeof b?.problematicSnippet === 'string' && b.problematicSnippet.trim()
-            ? b.problematicSnippet.trim()
-            : undefined,
-        fixedSnippet:
-          typeof b?.fixedSnippet === 'string' && b.fixedSnippet.trim()
-            ? b.fixedSnippet.trim()
-            : undefined,
-      };
-    });
-  }
-
-  const fixedFullCode =
-    typeof raw.fixedFullCode === 'string' && raw.fixedFullCode.trim()
-      ? raw.fixedFullCode
-      : originalCode;
-
-  const learningAdvice =
-    typeof raw.learningAdvice === 'string' && raw.learningAdvice.trim()
-      ? raw.learningAdvice.trim()
-      : 'Always trace boundary conditions, loop termination conditions, and verify invariant states.';
-
-  return {
-    status,
-    summary,
-    overallScore,
-    timeComplexity,
-    spaceComplexity,
-    bugs,
-    fixedFullCode,
-    learningAdvice,
-  };
-}
+// ─────────────────────────────────────────────
+// Feature D: Code Doctor
+// ─────────────────────────────────────────────
 
 export async function checkAndFixCode(
   problemText: string,
   code: string,
   errorOutput?: string,
-  options: GenerationOptions & { language?: string } = {}
+  options: GenerationOptions = {}
 ): Promise<CodeCheckResult> {
-  if (!code || !code.trim()) {
-    throw new Error('Please provide code to analyze.');
-  }
+  if (!code || !code.trim()) throw new UserError('Write some code first, then Check & Fix will review it.');
+  assertLength(problemText, code);
+  const lang = languageLabel(options.language);
 
-  const lang = options.language || 'Python';
+  // Line numbers in the prompt let the model report accurate `lineNumber`s.
+  const numbered = code
+    .split('\n')
+    .map((line, i) => `${String(i + 1).padStart(3, ' ')} | ${line}`)
+    .join('\n');
 
-  const systemInstruction = `
-You are AlgoBuddy Code Doctor, an elite senior FAANG technical interviewer and algorithmic debugger.
-The candidate wrote code in ${lang} for a DSA problem.
-Analyze the candidate's code with surgical precision:
-1. Syntax & Compilation: Catch any malformed syntax, wrong method calls, type mismatches, or missing standard imports in ${lang}.
-2. Runtime & Exception Risks: If an errorOutput is provided, pinpoint exactly why it crashed (e.g. IndexError, NullPointerException, recursion depth, stack overflow).
-3. Logic & Off-By-One Errors: Scrutinize loop bounds (< vs <=), pointer transitions, base cases, and state transitions.
-4. Edge Case Omissions: Empty array/matrix, single element, negative values, extreme constraints, duplicates, integer overflow.
-5. Provide the Clean Fixed Code: Provide the complete, production-grade, bug-free runnable solution retaining the candidate's core algorithmic approach and variable naming wherever possible.
-6. Score the code from 0 to 100 based on algorithmic correctness, edge case safety, and interview readiness.
+  const systemInstruction = `You are AlgoBuddy Code Doctor, a careful senior engineer reviewing a student's ${lang} solution.
+Find real problems only: syntax errors, crashes, wrong logic, off-by-one errors, missed edge cases, too-slow complexity. Do not invent issues. If the code is correct, return an empty bugs list.
+Keep the student's approach and variable names in the fix.
+Respond with valid JSON only.
+${FORMAT_RULES}`;
 
-Respond strictly in valid, unescaped JSON matching the requested schema.
-`;
-
-  const prompt = `
-Problem Statement:
+  const prompt = `Problem:
 """
 ${problemText}
 """
 
-Candidate's Code (${lang}):
-"""
-${code}
-"""
+Student's ${lang} code (line numbers are for reference only, they are not part of the code):
+${numbered}
 
-${errorOutput ? `Runtime / Execution Error Recorded:\n"""\n${errorOutput}\n"""` : 'No runtime crash recorded; perform static algorithmic & edge-case correctness audit.'}
+${errorOutput ? `Error from running it:\n"""\n${errorOutput.slice(0, 2000)}\n"""` : 'No runtime error was recorded. Review it statically.'}
 
-Return JSON strictly matching this schema:
+Return JSON with exactly these keys:
 {
-  "status": "clean" | "issues_found",
-  "summary": "1-2 sentence overview of code health and diagnosis",
+  "summary": "1-2 sentences on overall correctness.",
   "overallScore": 75,
-  "timeComplexity": "O(...)",
-  "spaceComplexity": "O(...)",
+  "timeComplexity": "O(...) of the student's code",
+  "spaceComplexity": "O(...) of the student's code",
   "bugs": [
-    {
-      "lineNumber": 14,
-      "issueType": "logic",
-      "title": "Short descriptive title (e.g. Off-by-one boundary check)",
-      "explanation": "Why this fails and what test case triggers it",
-      "problematicSnippet": "while left <= right:",
-      "fixedSnippet": "while left < right:"
-    }
+    { "lineNumber": 14, "issueType": "syntax | runtime | logic | edge-case | complexity", "title": "Short title", "explanation": "Why it fails and an input that triggers it.", "problematicSnippet": "the exact buggy line(s)", "fixedSnippet": "the corrected line(s)" }
   ],
-  "fixedFullCode": "// Complete, bug-free, runnable code in ${lang} solving the problem correctly",
-  "learningAdvice": "Pedagogical key takeaway to remember during interview"
+  "fixedFullCode": "The complete corrected ${lang} program WITHOUT line numbers. Use an empty string if nothing needs fixing.",
+  "learningAdvice": "One takeaway to remember in interviews."
 }
-`;
+overallScore is a number from 0 to 100 for correctness, edge-case safety and interview readiness.`;
+
+  const raw = await callLLM(prompt, systemInstruction, options);
+  return sanitizeCodeCheckResult(extractAndParseJSON(raw), code);
+}
+
+// ─────────────────────────────────────────────
+// Feature E: Resolve "LeetCode 42" / "trapping rain water" into a full statement
+// ─────────────────────────────────────────────
+
+export interface ResolvedProblem {
+  found: boolean;
+  confident: boolean;
+  title: string;
+  leetcodeNumber: number | null;
+  statement: string;
+  message: string;
+}
+
+export async function resolveProblemReference(reference: string, options: GenerationOptions = {}): Promise<ResolvedProblem> {
+  const ref = reference.trim().slice(0, 200);
+  if (!ref) throw new UserError('Type a problem name or number first.');
+
+  const systemInstruction = `You identify well-known coding interview problems (LeetCode, GeeksforGeeks, Codeforces, classic textbook problems) from a short reference typed by a student.
+Write problem statements in your own words. Never invent a problem: if you are not sure which problem the reference means, say so.
+Respond with valid JSON only.`;
+
+  const prompt = `The student typed: "${ref}"
+
+Return JSON:
+{
+  "found": true or false,
+  "confident": true only if you are sure this is the intended problem (e.g. the LeetCode number and title match),
+  "title": "Official problem title",
+  "leetcodeNumber": the LeetCode number or null,
+  "statement": "A complete, self-contained statement in your own words, using real newlines. Format:\nTitle\n\nDescription paragraph(s).\n\nExample 1:\nInput: ...\nOutput: ...\nExplanation: ...\n\nExample 2:\nInput: ...\nOutput: ...\n\nConstraints:\n- ...\n- ...",
+  "message": "If not found or not confident: one sentence telling the student what is ambiguous and asking them to paste the full statement. Otherwise an empty string."
+}`;
 
   const raw = await callLLM(prompt, systemInstruction, options);
   const parsed = extractAndParseJSON<any>(raw);
-  return sanitizeCodeCheckResult(parsed, code, lang);
+  const statement = typeof parsed?.statement === 'string' ? parsed.statement.replace(/\r\n/g, '\n').trim() : '';
+  const found = parsed?.found === true && statement.length > 40;
+  return {
+    found,
+    confident: found && parsed?.confident === true,
+    title: str(parsed?.title),
+    leetcodeNumber: Number.isInteger(parsed?.leetcodeNumber) ? parsed.leetcodeNumber : null,
+    statement: found ? statement : '',
+    message: str(parsed?.message) || (found ? '' : 'Could not identify this problem. Please paste the full problem statement.'),
+  };
 }
