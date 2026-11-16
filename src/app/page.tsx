@@ -10,6 +10,8 @@ import NotesView from '@/components/NotesView';
 import ApiKeyModal from '@/components/ApiKeyModal';
 import GmailAuthModal from '@/components/GmailAuthModal';
 import CodeDoctorModal from '@/components/CodeDoctorModal';
+import AboutModal from '@/components/AboutModal';
+import type { SignInMethods } from '@/lib/signInMethods';
 import { runPythonWithTrace } from '@/lib/pyodideRunner';
 import {
   TraceResult,
@@ -104,6 +106,8 @@ export default function Home() {
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [quota, setQuota] = useState<FreeQuota>({ used: 0, limit: FREE_AI_REQUEST_LIMIT });
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [signInMethods, setSignInMethods] = useState<SignInMethods | null>(null);
+  const [isAboutOpen, setIsAboutOpen] = useState(false);
 
   const activeKey = apiKeys[activeProvider] || '';
   const activeModel = selectedModels[activeProvider];
@@ -114,6 +118,7 @@ export default function Home() {
       const data = await res.json();
       setUserEmail(data.email || null);
       if (data.quota) setQuota(data.quota);
+      if (data.signIn) setSignInMethods(data.signIn);
     } catch {
       /* offline: keep current state */
     }
@@ -523,6 +528,17 @@ export default function Home() {
         </div>
       </main>
 
+      <footer className="max-w-7xl w-full mx-auto px-4 sm:px-6 pb-6 text-xs text-fg-subtle flex flex-wrap items-center gap-x-4 gap-y-1">
+        <button onClick={() => setIsAboutOpen(true)} className="hover:text-fg hover:underline">
+          How AlgoBuddy uses AI and your data
+        </button>
+        <a href="https://github.com/DeveshNathJha/AlgoBuddy" target="_blank" rel="noreferrer" className="hover:text-fg hover:underline">
+          Source on GitHub
+        </a>
+      </footer>
+
+      <AboutModal isOpen={isAboutOpen} onClose={() => setIsAboutOpen(false)} freeLimit={quota.limit} />
+
       <ApiKeyModal
         isOpen={isKeyModalOpen}
         onClose={() => setIsKeyModalOpen(false)}
@@ -535,6 +551,7 @@ export default function Home() {
         selectedModels={selectedModels}
         onSaveKeys={handleSaveKeys}
         freeLimit={quota.limit}
+        onOpenAbout={() => setIsAboutOpen(true)}
       />
 
       <GmailAuthModal
@@ -544,6 +561,9 @@ export default function Home() {
         onLogin={handleLogin}
         onLogout={handleLogout}
         freeLimit={quota.limit}
+        methods={signInMethods}
+        onUseOwnKey={() => setIsKeyModalOpen(true)}
+        onOpenAbout={() => setIsAboutOpen(true)}
       />
 
       <CodeDoctorModal

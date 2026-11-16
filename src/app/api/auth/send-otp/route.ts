@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { Resend } from 'resend';
+import { isSessionConfigured } from '@/lib/session';
 import {
   generateAndStoreOtp,
   isDisposableEmail,
@@ -12,6 +13,10 @@ const IS_PROD = process.env.NODE_ENV === 'production';
 
 /** POST /api/auth/send-otp  { email } */
 export async function POST(req: NextRequest) {
+  if (!isSessionConfigured()) {
+    console.error('[Auth] SESSION_SECRET is missing or shorter than 32 characters: sign-in is disabled. Set it in Vercel > Settings > Environment Variables and redeploy.');
+    return NextResponse.json({ success: false, error: 'Sign-in is temporarily unavailable. You can still use AlgoBuddy with your own free API key.' }, { status: 503 });
+  }
   try {
     const { email: rawEmail } = await req.json();
     if (typeof rawEmail !== 'string') {

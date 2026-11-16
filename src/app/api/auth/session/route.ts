@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { clearSessionCookie, getSessionEmail } from '@/lib/session';
 import { getQuotaUsed } from '@/lib/userStore';
 import { FREE_AI_REQUEST_LIMIT } from '@/lib/config';
+import { getSignInMethods } from '@/lib/signInMethods';
 
 export const dynamic = 'force-dynamic';
 
@@ -12,9 +13,11 @@ export async function GET() {
     return NextResponse.json({
       email,
       quota: { used: email ? await getQuotaUsed(email) : 0, limit: FREE_AI_REQUEST_LIMIT },
+      signIn: getSignInMethods(),
     });
-  } catch {
-    return NextResponse.json({ email: null, quota: { used: 0, limit: FREE_AI_REQUEST_LIMIT } });
+  } catch (e: any) {
+    console.error('[Auth] session check failed:', e?.message);
+    return NextResponse.json({ email: null, quota: { used: 0, limit: FREE_AI_REQUEST_LIMIT }, signIn: getSignInMethods() });
   }
 }
 

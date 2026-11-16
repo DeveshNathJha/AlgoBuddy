@@ -4,6 +4,7 @@ import React, { useEffect, useState } from 'react';
 import { GoogleLogin } from '@react-oauth/google';
 import { toast } from 'sonner';
 import Modal from './Modal';
+import type { SignInMethods } from '@/lib/signInMethods';
 
 interface GmailAuthModalProps {
   isOpen: boolean;
@@ -12,6 +13,10 @@ interface GmailAuthModalProps {
   onLogin: (email: string) => void;
   onLogout: () => void;
   freeLimit: number;
+  /** Methods the server says will work; null while unknown. */
+  methods: SignInMethods | null;
+  onUseOwnKey: () => void;
+  onOpenAbout: () => void;
 }
 
 const HAS_GOOGLE = Boolean(process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID);
@@ -22,7 +27,9 @@ async function postJson(url: string, body: unknown) {
   return res.json().catch(() => ({ success: false, error: 'AlgoBuddy had a problem on its side. Please try again in a moment.' }));
 }
 
-export default function GmailAuthModal({ isOpen, onClose, userEmail, onLogin, onLogout, freeLimit }: GmailAuthModalProps) {
+export default function GmailAuthModal({ isOpen, onClose, userEmail, onLogin, onLogout, freeLimit, methods, onUseOwnKey, onOpenAbout }: GmailAuthModalProps) {
+  const googleOn = methods ? methods.google : HAS_GOOGLE;
+  const emailOn = methods ? methods.email : true;
   const [email, setEmail] = useState('');
   const [otp, setOtp] = useState('');
   const [otpSent, setOtpSent] = useState(false);
@@ -126,20 +133,44 @@ export default function GmailAuthModal({ isOpen, onClose, userEmail, onLogin, on
   }
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Sign in" subtitle={`Get ${freeLimit} free AI requests. No API key needed.`} size="md">
+    <Modal
+      isOpen={isOpen}
+      onClose={onClose}
+      title="Sign in"
+      subtitle={googleOn || emailOn ? `Get ${freeLimit} free AI requests. No API key needed.` : undefined}
+      size="md"
+    >
       <div className="space-y-5 text-sm">
-        {HAS_GOOGLE && (
-          <>
-            <div className="flex justify-center">
-              <GoogleLogin onSuccess={googleSuccess} onError={() => toast.error('Google sign-in was cancelled or failed.')} text="continue_with" shape="rectangular" width={300} />
-            </div>
-            <div className="flex items-center gap-3 text-xs text-fg-subtle">
-              <span className="flex-1 h-px bg-border" /> or use an email code <span className="flex-1 h-px bg-border" />
-            </div>
-          </>
+        {!googleOn && !emailOn && (
+          <div className="rounded-lg border border-warning/40 bg-warning/10 p-4 space-y-3">
+            <p className="text-fg">
+              Sign-in is temporarily unavailable. You can still use every AI feature right now with your own free API key. It takes about a minute to get one.
+            </p>
+            <button
+              onClick={() => {
+                onClose();
+                onUseOwnKey();
+              }}
+              className="btn-primary w-full py-2"
+            >
+              Use my own free API key
+            </button>
+          </div>
         )}
 
-        {!otpSent ? (
+        {googleOn && (
+          <div className="flex justify-center">
+            <GoogleLogin onSuccess={googleSuccess} onError={() => toast.error('Google sign-in was cancelled or failed.')} text="continue_with" shape="rectangular" width={300} />
+          </div>
+        )}
+
+        {googleOn && emailOn && (
+          <div className="flex items-center gap-3 text-xs text-fg-subtle">
+            <span className="flex-1 h-px bg-border" /> or use an email code <span className="flex-1 h-px bg-border" />
+          </div>
+        )}
+
+        {!emailOn ? null : !otpSent ? (
           <form onSubmit={sendOtp} className="space-y-3">
             <label className="block">
               <span className="block font-medium text-fg mb-1">Email</span>
@@ -177,7 +208,13 @@ export default function GmailAuthModal({ isOpen, onClose, userEmail, onLogin, on
           </form>
         )}
 
-        <p className="text-xs text-fg-subtle">Each account gets {freeLimit} free AI requests. Disposable email addresses are not accepted.</p>
+        <p className="text-xs text-fg-subtle">
+          {googleOn || emailOn ? `Each account gets ${freeLimit} free AI requests.` : ''}
+          {emailOn ? ' Disposable email addresses are not accepted.' : ''}{' '}
+          <button type="button" onClick={onOpenAbout} className="text-accent-text hover:underline">
+            How AlgoBuddy uses AI and your data
+          </button>
+        </p>
       </div>
     </Modal>
   );

@@ -23,7 +23,7 @@ AlgoBuddy bridges this gap with an all-in-one developer workspace.
 
 ## Key Features
 
-### 1. Structured Thinking Guide ("Kaise Sochna Hai")
+### 1. How to Think: Structured Thinking Guide
 - **Pattern Recognition:** Instant identification of the core pattern (*Two Pointers, Sliding Window, Monotonic Stack, etc.*) and explicit reasoning for *why* it fits.
 - **Tradeoff Analysis:** Side-by-side comparison between brute-force and optimal approaches (time/space complexity, bottlenecks, and the key "Aha!" realization).
 - **Progressive Hint Ladder:** 4 levels of guided hints (Nudge → Direction → Blueprint → Full strategy), shown *before* the solutions so you practice thinking without getting spoiled.
