@@ -7,6 +7,8 @@ export const metadata: Metadata = {
   description: 'Master algorithmic intuition, line-by-line execution tracing, and verbal interview presentation.',
 };
 
+import Providers from '@/components/Providers';
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -15,7 +17,9 @@ export default function RootLayout({
   return (
     <html lang="en" className="dark">
       <body className="bg-slate-950 text-slate-100 antialiased selection:bg-indigo-500 selection:text-white">
-        {children}
+        <Providers>
+          {children}
+        </Providers>
         <Toaster position="top-right" richColors theme="dark" closeButton />
       </body>
     </html>
