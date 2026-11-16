@@ -1,49 +1,31 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { verifyOtp, saveVerifiedUser } from '@/lib/userStore';
+import { normalizeEmail, recordVerifiedUser, verifyOtp } from '@/lib/userStore';
+import { attachSessionCookie } from '@/lib/session';
 
+const MESSAGES = {
+  invalid: 'Incorrect code. Please check and try again.',
+  expired: 'This code has expired. Please request a new one.',
+  locked: 'Too many wrong attempts. Please request a new code.',
+};
+
+/** POST /api/auth/verify-otp  { email, otp } */
 export async function POST(req: NextRequest) {
   try {
     const { email, otp } = await req.json();
-
-    if (!email || !otp) {
-      return NextResponse.json(
-        { success: false, error: 'Email and 6-digit OTP code are required.' },
-        { status: 400 }
-      );
+    if (typeof email !== 'string' || typeof otp !== 'string' || !/^\d{6}$/.test(otp.trim())) {
+      return NextResponse.json({ success: false, error: 'Email and 6-digit code are required.' }, { status: 400 });
     }
 
-    const trimmedEmail = email.trim().toLowerCase();
-    const trimmedOtp = otp.trim();
-
-    const isValid = verifyOtp(trimmedEmail, trimmedOtp);
-
-    if (!isValid) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: 'Invalid or expired verification code. Please request a new code.',
-        },
-        { status: 400 }
-      );
+    const normalized = normalizeEmail(email);
+    const result = await verifyOtp(normalized, otp);
+    if (result !== 'ok') {
+      return NextResponse.json({ success: false, error: MESSAGES[result] }, { status: 400 });
     }
 
-    // Save and register verified user
-    const user = saveVerifiedUser({
-      email: trimmedEmail,
-      authMethod: 'otp',
-    });
-
-    console.log(`[AlgoBuddy Auth] User successfully verified: ${trimmedEmail}`);
-
-    return NextResponse.json({
-      success: true,
-      user,
-      message: 'Email successfully verified!',
-    });
+    await recordVerifiedUser(normalized, 'otp');
+    return attachSessionCookie(NextResponse.json({ success: true, user: { email: normalized } }), normalized);
   } catch (e: any) {
-    return NextResponse.json(
-      { success: false, error: e.message || 'Verification failed.' },
-      { status: 500 }
-    );
+    console.error('[Auth] verify-otp failed:', e?.message);
+    return NextResponse.json({ success: false, error: 'Verification failed.' }, { status: 500 });
   }
 }

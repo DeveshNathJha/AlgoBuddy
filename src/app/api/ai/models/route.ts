@@ -1,60 +1,47 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { PROVIDER_MODELS } from '@/lib/config';
+import type { AIProvider } from '@/lib/types';
 
 /**
- * POST /api/ai/models
- * Securely queries active models from provider via POST body (no query string key exposure).
+ * POST /api/ai/models  { provider, key }
+ * Lists the provider's live chat models for the given key, falling back to the curated list.
  */
 export async function POST(req: NextRequest) {
+  let provider: AIProvider = 'gemini';
   try {
     const body = await req.json();
-    const provider = body.provider || 'gemini';
-    const apiKey = body.key;
+    if (body.provider in PROVIDER_MODELS) provider = body.provider;
+    const key = typeof body.key === 'string' ? body.key.trim() : '';
 
-    if (provider === 'groq' && apiKey) {
-      try {
-        const response = await fetch('https://api.groq.com/openai/v1/models', {
-          headers: {
-            'Authorization': `Bearer ${apiKey}`,
-            'Content-Type': 'application/json',
-          },
-        });
-
-        if (response.ok) {
-          const data = await response.json();
-          // Filter for active text generation/chat models
-          const chatModels = (data.data || [])
-            .map((m: any) => m.id)
-            .filter((id: string) => 
-              !id.includes('whisper') && 
-              !id.includes('guard') && 
-              !id.includes('safeguard') &&
-              !id.includes('orpheus')
-            );
-
-          if (chatModels.length > 0) {
-            return NextResponse.json({ success: true, models: chatModels });
-          }
-        }
-      } catch (err) {
-        console.warn('Dynamic Groq model fetch failed, falling back to verified list:', err);
-      }
+    if (key) {
+      const live = await fetchLiveModels(provider, key);
+      if (live.length > 0) return NextResponse.json({ success: true, models: live, live: true });
     }
-
-    // Curated active production models
-    const FALLBACK_MODELS: Record<string, string[]> = {
-      gemini: ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro'],
-      groq: ['openai/gpt-oss-20b', 'openai/gpt-oss-120b', 'qwen/qwen3.6-27b'],
-      openai: ['gpt-4o-mini', 'gpt-4o'],
-    };
-
-    return NextResponse.json({
-      success: true,
-      models: FALLBACK_MODELS[provider] || ['gemini-1.5-flash'],
-    });
-  } catch (error: any) {
-    return NextResponse.json(
-      { success: false, error: error.message || 'Failed to fetch models' },
-      { status: 500 }
-    );
+  } catch (err) {
+    console.warn('Live model fetch failed, using curated list:', err);
   }
+  return NextResponse.json({ success: true, models: PROVIDER_MODELS[provider].models, live: false });
+}
+
+async function fetchLiveModels(provider: AIProvider, key: string): Promise<string[]> {
+  if (provider === 'gemini') {
+    const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200', {
+      headers: { 'x-goog-api-key': key },
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return (data.models || [])
+      .filter((m: any) => m.supportedGenerationMethods?.includes('generateContent'))
+      .map((m: any) => String(m.name).replace(/^models\//, ''))
+      .filter((id: string) => id.startsWith('gemini') && !/(embedding|image|tts|audio|live|vision)/.test(id));
+  }
+
+  const url = provider === 'groq' ? 'https://api.groq.com/openai/v1/models' : 'https://api.openai.com/v1/models';
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${key}` } });
+  if (!res.ok) return [];
+  const data = await res.json();
+  const ids: string[] = (data.data || []).map((m: any) => m.id);
+  return provider === 'groq'
+    ? ids.filter((id) => !/(whisper|guard|safeguard|orpheus|tts|compound)/.test(id))
+    : ids.filter((id) => /^(gpt-|o\d)/.test(id) && !/(audio|realtime|transcribe|tts|image|search)/.test(id));
 }

@@ -1,39 +1,13 @@
-import { NextRequest, NextResponse } from 'next/server';
 import { generateInterviewScript } from '@/lib/aiClient';
+import { handleAIRequest } from '@/lib/aiRoute';
+import { UserError } from '@/lib/errors';
 
-/**
- * POST /api/ai/interview-script
- * Accepts: { problemText, codeSnippet (optional), provider, userApiKey, model }
- * Allows candidates to generate full interview presentation script with question only!
- */
-export async function POST(req: NextRequest) {
-  try {
-    const body = await req.json();
-    const { problemText, codeSnippet, provider, userApiKey, model, language } = body;
+export const maxDuration = 60;
 
-    if (!problemText || typeof problemText !== 'string' || problemText.trim().length === 0) {
-      return NextResponse.json(
-        { error: 'Problem description is required to generate the interview script.' },
-        { status: 400 }
-      );
-    }
-
-    const data = await generateInterviewScript(problemText, codeSnippet || '', {
-      provider,
-      apiKey: userApiKey,
-      model,
-      language,
-    });
-
-    return NextResponse.json({ success: true, data });
-  } catch (err: any) {
-    console.error('Error in interview-script API:', err);
-    const message = err.message || 'Failed to generate interview script.';
-    const requiresKey = message.toLowerCase().includes('api key not found') || message.includes('API key not found');
-
-    return NextResponse.json(
-      { error: message, requiresKey },
-      { status: 500 }
-    );
+/** POST /api/ai/interview-script  { problemText, codeSnippet?, provider, userApiKey?, model?, language } */
+export const POST = handleAIRequest(async ({ body, provider, apiKey, model, language }) => {
+  if (typeof body.problemText !== 'string' || !body.problemText.trim()) {
+    throw new UserError('Enter a problem first.');
   }
-}
+  return generateInterviewScript(body.problemText, body.codeSnippet || '', { provider, apiKey, model, language });
+});

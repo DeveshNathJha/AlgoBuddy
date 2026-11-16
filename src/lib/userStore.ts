@@ -1,74 +1,15 @@
-import fs from 'fs';
-import path from 'path';
+/**
+ * User verification, OTP and free-quota storage (server only).
+ * Backed by `kv.ts` so it works across serverless instances when Upstash is configured.
+ */
 
-export interface UserRecord {
-  email: string;
-  name?: string;
-  avatar?: string;
-  authMethod: 'google' | 'otp';
-  verifiedAt: string;
-  questionsUsed: number;
-}
+import crypto from 'crypto';
+import { kvDecr, kvDel, kvGet, kvIncr, kvSet } from './kv';
+import { FREE_AI_REQUEST_LIMIT } from './config';
 
-// In-memory fallback (for Vercel serverless / ephemeral environments)
-const inMemoryUsers: Map<string, UserRecord> = new Map();
-const inMemoryOtps: Map<string, { code: string; expiresAt: number }> = new Map();
+const OTP_TTL_SECONDS = 10 * 60;
+const OTP_MAX_ATTEMPTS = 5;
 
-const DATA_DIR = path.join(process.cwd(), 'data');
-const USERS_FILE = path.join(DATA_DIR, 'users.json');
-
-// Ensure directory exists if in local environment
-function ensureDataFile() {
-  try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    if (!fs.existsSync(USERS_FILE)) {
-      fs.writeFileSync(USERS_FILE, JSON.stringify([], null, 2), 'utf-8');
-    }
-  } catch (e) {
-    // If running in read-only environment (e.g. some serverless containers), use inMemory
-  }
-}
-
-// Load users from storage
-function loadUsers(): Record<string, UserRecord> {
-  const usersObj: Record<string, UserRecord> = {};
-  try {
-    ensureDataFile();
-    if (fs.existsSync(USERS_FILE)) {
-      const content = fs.readFileSync(USERS_FILE, 'utf-8');
-      const parsed: UserRecord[] = JSON.parse(content || '[]');
-      parsed.forEach((u) => {
-        usersObj[u.email.toLowerCase()] = u;
-      });
-    }
-  } catch (e) {
-    // Fallback to memory
-  }
-
-  // Merge in-memory users
-  inMemoryUsers.forEach((val, key) => {
-    if (!usersObj[key]) {
-      usersObj[key] = val;
-    }
-  });
-
-  return usersObj;
-}
-
-// Save users to storage
-function persistUsers(usersObj: Record<string, UserRecord>) {
-  const usersList = Object.values(usersObj);
-  try {
-    ensureDataFile();
-    fs.writeFileSync(USERS_FILE, JSON.stringify(usersList, null, 2), 'utf-8');
-  } catch (e) {
-    // Ignore in read-only environments
-  }
-}
-
-// Common disposable / fake email domains to block
 const DISPOSABLE_DOMAINS = new Set([
   'mailinator.com',
   'tempmail.com',
@@ -87,88 +28,92 @@ const DISPOSABLE_DOMAINS = new Set([
   'mytemp.email',
 ]);
 
-export function isDisposableEmail(email: string): boolean {
-  if (!email || !email.includes('@')) return true;
-  const domain = email.split('@')[1].toLowerCase().trim();
-  return DISPOSABLE_DOMAINS.has(domain);
+export function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
 }
 
-export function generateAndStoreOtp(email: string): string {
-  const normalized = email.toLowerCase().trim();
-  // Generate a cryptographically random 6-digit code
-  const code = Math.floor(100000 + Math.random() * 900000).toString();
-  const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
+export function isValidEmail(email: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
 
-  inMemoryOtps.set(normalized, { code, expiresAt });
+export function isDisposableEmail(email: string): boolean {
+  const domain = email.split('@')[1]?.toLowerCase().trim();
+  return !domain || DISPOSABLE_DOMAINS.has(domain);
+}
+
+function hashOtp(email: string, code: string): string {
+  return crypto.createHash('sha256').update(`${email}:${code}`).digest('hex');
+}
+
+/** Generates a 6-digit code, stores only its hash, and resets the attempt counter. */
+export async function generateAndStoreOtp(email: string): Promise<string> {
+  const code = crypto.randomInt(100000, 1000000).toString();
+  await kvSet(`otp:${email}`, hashOtp(email, code), OTP_TTL_SECONDS);
+  await kvDel(`otp-attempts:${email}`);
   return code;
 }
 
-export function verifyOtp(email: string, code: string): boolean {
-  const normalized = email.toLowerCase().trim();
-  const record = inMemoryOtps.get(normalized);
+export type OtpResult = 'ok' | 'invalid' | 'expired' | 'locked';
 
-  if (!record) return false;
-  if (Date.now() > record.expiresAt) {
-    inMemoryOtps.delete(normalized);
-    return false;
+export async function verifyOtp(email: string, code: string): Promise<OtpResult> {
+  const stored = await kvGet(`otp:${email}`);
+  if (!stored) return 'expired';
+
+  const attempts = await kvIncr(`otp-attempts:${email}`, OTP_TTL_SECONDS);
+  if (attempts > OTP_MAX_ATTEMPTS) {
+    await kvDel(`otp:${email}`);
+    return 'locked';
   }
 
-  if (record.code === code.trim()) {
-    inMemoryOtps.delete(normalized);
-    return true;
+  if (stored !== hashOtp(email, code.trim())) return 'invalid';
+
+  await kvDel(`otp:${email}`);
+  await kvDel(`otp-attempts:${email}`);
+  return 'ok';
+}
+
+/**
+ * Fixed-window rate limiter. Returns true when the action is allowed.
+ * e.g. rateLimit(`send-otp:${email}`, 1, 60) => once per minute.
+ */
+export async function rateLimit(key: string, max: number, windowSeconds: number): Promise<boolean> {
+  const count = await kvIncr(`rl:${key}`, windowSeconds);
+  return count <= max;
+}
+
+export async function recordVerifiedUser(email: string, method: 'google' | 'otp', name?: string) {
+  const existing = await kvGet(`user:${email}`);
+  const prev = existing ? JSON.parse(existing) : {};
+  await kvSet(
+    `user:${email}`,
+    JSON.stringify({
+      email,
+      name: name || prev.name || email.split('@')[0],
+      authMethod: method,
+      verifiedAt: prev.verifiedAt || new Date().toISOString(),
+      lastLoginAt: new Date().toISOString(),
+    })
+  );
+}
+
+export async function getQuotaUsed(email: string): Promise<number> {
+  return Number((await kvGet(`quota:${email}`)) || 0);
+}
+
+/**
+ * Reserves one free request. Returns the new count, or null if the user is out of quota.
+ * Reserving before the AI call (and refunding on failure) prevents parallel requests
+ * from overshooting the limit.
+ */
+export async function reserveFreeRequest(email: string): Promise<number | null> {
+  const used = await kvIncr(`quota:${email}`);
+  if (used > FREE_AI_REQUEST_LIMIT) {
+    await kvDecr(`quota:${email}`);
+    return null;
   }
-
-  return false;
+  return used;
 }
 
-export function saveVerifiedUser(userData: {
-  email: string;
-  name?: string;
-  avatar?: string;
-  authMethod: 'google' | 'otp';
-}): UserRecord {
-  const normalized = userData.email.toLowerCase().trim();
-  const allUsers = loadUsers();
-
-  const existing = allUsers[normalized];
-  const updatedUser: UserRecord = {
-    email: normalized,
-    name: userData.name || existing?.name || normalized.split('@')[0],
-    avatar: userData.avatar || existing?.avatar,
-    authMethod: userData.authMethod,
-    verifiedAt: existing?.verifiedAt || new Date().toISOString(),
-    questionsUsed: existing ? existing.questionsUsed : 0,
-  };
-
-  allUsers[normalized] = updatedUser;
-  inMemoryUsers.set(normalized, updatedUser);
-  persistUsers(allUsers);
-
-  return updatedUser;
-}
-
-export function getUser(email: string): UserRecord | undefined {
-  const normalized = email.toLowerCase().trim();
-  const allUsers = loadUsers();
-  return allUsers[normalized] || inMemoryUsers.get(normalized);
-}
-
-export function incrementUserQuota(email: string): number {
-  const normalized = email.toLowerCase().trim();
-  const allUsers = loadUsers();
-  const user = allUsers[normalized] || inMemoryUsers.get(normalized);
-
-  if (user) {
-    user.questionsUsed = (user.questionsUsed || 0) + 1;
-    allUsers[normalized] = user;
-    inMemoryUsers.set(normalized, user);
-    persistUsers(allUsers);
-    return user.questionsUsed;
-  }
-  return 0;
-}
-
-export function getAllUsers(): UserRecord[] {
-  const allUsers = loadUsers();
-  return Object.values(allUsers);
+export async function refundFreeRequest(email: string): Promise<void> {
+  await kvDecr(`quota:${email}`);
 }

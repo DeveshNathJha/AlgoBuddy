@@ -1,269 +1,185 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ProblemNote, ProgrammingLanguage } from '@/lib/types';
-import {
-  BookOpen,
-  Plus,
-  Save,
-  Trash2,
-  Calendar,
-  Code2,
-  Search,
-  ExternalLink,
-  CheckCircle,
-  Sparkles
-} from 'lucide-react';
+import { languageLabel } from '@/lib/config';
+import { Search, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 
 interface NotesViewProps {
   currentProblemTitle: string;
+  currentProblemText: string;
   currentLanguage: ProgrammingLanguage;
-  userEmail: string | null;
-  onOpenAuthModal: () => void;
-  onLoadProblem: (problemTitle: string) => void;
+  onOpenProblem: (note: ProblemNote) => void;
 }
 
-export default function NotesView({
-  currentProblemTitle,
-  currentLanguage,
-  userEmail,
-  onOpenAuthModal,
-  onLoadProblem,
-}: NotesViewProps) {
+const STORAGE_KEY = 'algobuddy_user_notes';
+
+function loadNotes(): ProblemNote[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function persist(notes: ProblemNote[]) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(notes));
+  } catch {
+    toast.error('Could not save: browser storage is full or blocked.');
+  }
+}
+
+const today = () => new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+
+export default function NotesView({ currentProblemTitle, currentProblemText, currentLanguage, onOpenProblem }: NotesViewProps) {
   const [notes, setNotes] = useState<ProblemNote[]>([]);
-  const [activeNoteText, setActiveNoteText] = useState<string>('');
-  const [searchQuery, setSearchQuery] = useState<string>('');
-  const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
+  const [draft, setDraft] = useState('');
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
 
-  // Load saved notes from localStorage on mount
+  // Open the note that belongs to the current problem, if any.
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const stored = localStorage.getItem('algobuddy_user_notes');
-      if (stored) {
-        try {
-          const parsed = JSON.parse(stored);
-          setNotes(parsed);
-          // If a note exists for the current problem, load it
-          const existing = parsed.find((n: ProblemNote) => n.problemTitle === currentProblemTitle);
-          if (existing) {
-            setActiveNoteText(existing.content);
-            setSelectedNoteId(existing.id);
-          }
-        } catch (e) {
-          console.error('Failed to parse notes from storage', e);
-        }
-      }
-    }
-  }, [currentProblemTitle]);
+    const all = loadNotes();
+    setNotes(all);
+    const existing = all.find((n) => (n.problemText ? n.problemText === currentProblemText : n.problemTitle === currentProblemTitle));
+    setEditingId(existing?.id || null);
+    setDraft(existing?.content || '');
+  }, [currentProblemTitle, currentProblemText]);
 
-  // Save or update active note
-  const handleSaveNote = () => {
-    if (!userEmail) {
-      onOpenAuthModal();
-      toast.info('Sign in with your Google account to save and sync notes.');
+  const editing = notes.find((n) => n.id === editingId);
+  const savedContent = editing?.content ?? '';
+  const isDirty = draft.trim() !== savedContent.trim();
+
+  const save = () => {
+    if (!draft.trim()) {
+      toast.warning('Write something first.');
       return;
     }
-
-    if (!activeNoteText.trim()) {
-      toast.warning('Note content cannot be empty.');
-      return;
-    }
-
-    const now = new Date().toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-    });
-
     let updated: ProblemNote[];
-
-    if (selectedNoteId) {
-      // Update existing
-      updated = notes.map((n) =>
-        n.id === selectedNoteId
-          ? {
-              ...n,
-              content: activeNoteText,
-              updatedAt: now,
-              language: currentLanguage,
-            }
-          : n
-      );
-      toast.success('Note updated successfully!');
+    if (editing) {
+      updated = notes.map((n) => (n.id === editing.id ? { ...n, content: draft, updatedAt: today(), language: currentLanguage } : n));
     } else {
-      // Create new
-      const newNote: ProblemNote = {
-        id: 'note_' + Date.now(),
-        problemTitle: currentProblemTitle || 'Custom Problem',
-        content: activeNoteText,
+      const note: ProblemNote = {
+        id: `note_${Date.now()}`,
+        problemTitle: currentProblemTitle || 'Untitled problem',
+        problemText: currentProblemText,
+        content: draft,
         language: currentLanguage,
-        createdAt: now,
-        updatedAt: now,
+        createdAt: today(),
+        updatedAt: today(),
       };
-      updated = [newNote, ...notes];
-      setSelectedNoteId(newNote.id);
-      toast.success('New note saved for this problem!');
+      updated = [note, ...notes];
+      setEditingId(note.id);
     }
-
     setNotes(updated);
-    localStorage.setItem('algobuddy_user_notes', JSON.stringify(updated));
+    persist(updated);
+    toast.success('Note saved.');
   };
 
-  const handleDeleteNote = (id: string) => {
+  const remove = (id: string) => {
+    if (!window.confirm('Delete this note?')) return;
     const updated = notes.filter((n) => n.id !== id);
     setNotes(updated);
-    localStorage.setItem('algobuddy_user_notes', JSON.stringify(updated));
-    if (selectedNoteId === id) {
-      setSelectedNoteId(null);
-      setActiveNoteText('');
+    persist(updated);
+    if (editingId === id) {
+      setEditingId(null);
+      setDraft('');
     }
-    toast.info('Note deleted.');
   };
 
-  const handleSelectSavedNote = (note: ProblemNote) => {
-    setSelectedNoteId(note.id);
-    setActiveNoteText(note.content);
-  };
-
-  const handleStartNewNote = () => {
-    setSelectedNoteId(null);
-    setActiveNoteText('');
-  };
-
-  // Filter notes by search
-  const filteredNotes = notes.filter(
-    (n) =>
-      n.problemTitle.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      n.content.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return q ? notes.filter((n) => n.problemTitle.toLowerCase().includes(q) || n.content.toLowerCase().includes(q)) : notes;
+  }, [notes, query]);
 
   return (
-    <div className="space-y-6 pb-12">
-      
-      {/* 1. Active Problem Note Editor Card */}
-      <div className="p-5 rounded-2xl bg-slate-900/80 border border-slate-800 shadow-sm space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-800">
-          <div>
-            <div className="flex items-center gap-2">
-              <BookOpen className="w-4 h-4 text-indigo-400" />
-              <span className="text-xs font-bold text-white uppercase tracking-wider">
-                Interview Notes &amp; Key Takeaways
-              </span>
-            </div>
-            <p className="text-xs text-indigo-300/90 mt-0.5 font-medium">
-              Linked to: <span className="text-slate-200">{currentProblemTitle || 'Active Problem'}</span>
-            </p>
-          </div>
+    <div className="space-y-4 pb-12">
+      <div>
+        <h2 className="text-lg font-semibold text-fg">Notes</h2>
+        <p className="text-sm text-fg-subtle">Your revision notes: tricky edge cases, the key insight, mistakes you made. Saved in this browser.</p>
+      </div>
 
-          <div className="flex items-center gap-2">
-            {selectedNoteId && (
+      <section className="card p-5 space-y-3">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div className="min-w-0">
+            <p className="section-label">{editing ? 'Editing note for' : 'New note for'}</p>
+            <p className="font-medium text-fg truncate">{editing?.problemTitle || currentProblemTitle || 'Untitled problem'}</p>
+          </div>
+          <div className="flex items-center gap-1.5">
+            {editing && (
               <button
-                onClick={handleStartNewNote}
-                className="px-2.5 py-1.5 rounded-lg text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 flex items-center gap-1 font-medium transition"
+                onClick={() => {
+                  setEditingId(null);
+                  setDraft('');
+                }}
+                className="btn-ghost btn-sm"
               >
-                <Plus className="w-3.5 h-3.5" /> New Note
+                New note
               </button>
             )}
-
-            <button
-              onClick={handleSaveNote}
-              className="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white shadow-sm flex items-center gap-1.5 transition"
-            >
-              <Save className="w-3.5 h-3.5" /> Save Note
+            <button onClick={save} disabled={!isDirty} className="btn-primary btn-sm">
+              {isDirty ? 'Save' : 'Saved'}
             </button>
           </div>
         </div>
-
-        {/* Note Textarea */}
         <textarea
-          value={activeNoteText}
-          onChange={(e) => setActiveNoteText(e.target.value)}
-          placeholder="Jot down interview gotchas, recurrence relations, edge cases, or company tags (e.g. Asked in Amazon round 2)..."
-          rows={5}
-          className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 leading-relaxed font-sans resize-y"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          placeholder={'Key insight: ...\nEdge case I missed: ...\nAsked in: ...'}
+          rows={6}
+          className="input resize-y leading-relaxed"
         />
+        <p className="text-xs text-fg-subtle">Stored only in this browser. Clearing site data deletes your notes.</p>
+      </section>
 
-        <div className="flex items-center justify-between text-[11px] text-slate-500 pt-1">
-          <span>Notes are linked directly to this question and saved in your account.</span>
-          <span className="uppercase text-[10px] font-mono bg-slate-800 px-2 py-0.5 rounded text-slate-400">
-            {currentLanguage}
-          </span>
-        </div>
-      </div>
-
-      {/* 2. All Saved Notes Cheat-Sheet Drawer */}
-      <div className="p-5 rounded-2xl bg-slate-900/50 border border-slate-800 space-y-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2 text-xs font-bold text-white uppercase tracking-wider">
-            <BookOpen className="w-4 h-4 text-emerald-400" />
-            <span>My Revision Notebook ({notes.length})</span>
-          </div>
-
-          {/* Search Input */}
-          <div className="relative">
-            <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-2.5" />
-            <input
-              type="text"
-              placeholder="Search notes..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-8 pr-3 py-1 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 w-36 sm:w-48"
-            />
+      <section className="card p-5 space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="text-sm font-semibold text-fg">All notes ({notes.length})</h3>
+          <div className="relative w-48">
+            <Search className="w-3.5 h-3.5 text-fg-subtle absolute left-2.5 top-1/2 -translate-y-1/2" />
+            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search notes" className="input pl-8 py-1.5" />
           </div>
         </div>
 
-        {filteredNotes.length === 0 ? (
-          <div className="py-8 text-center text-xs text-slate-500 italic">
-            {notes.length === 0
-              ? 'No notes saved yet. Write your first revision takeaway above!'
-              : 'No notes match your search query.'}
-          </div>
+        {filtered.length === 0 ? (
+          <p className="py-6 text-center text-sm text-fg-subtle">{notes.length === 0 ? 'No notes yet.' : 'No notes match your search.'}</p>
         ) : (
-          <div className="space-y-3 max-h-[420px] overflow-y-auto pr-1">
-            {filteredNotes.map((note) => {
-              const isSelected = selectedNoteId === note.id;
-
-              return (
-                <div
-                  key={note.id}
-                  onClick={() => handleSelectSavedNote(note)}
-                  className={`p-3.5 rounded-xl border cursor-pointer transition text-xs space-y-2 ${
-                    isSelected
-                      ? 'bg-slate-900 border-indigo-500/80 shadow-sm'
-                      : 'bg-slate-950/70 border-slate-800/80 hover:bg-slate-900/60'
-                  }`}
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="font-semibold text-slate-200">{note.problemTitle}</span>
-                    
-                    <div className="flex items-center gap-2">
-                      <span className="text-[10px] text-slate-500 flex items-center gap-1">
-                        <Calendar className="w-3 h-3" /> {note.updatedAt}
-                      </span>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleDeleteNote(note.id);
-                        }}
-                        className="text-slate-500 hover:text-rose-400 p-1 rounded hover:bg-slate-800 transition"
-                        title="Delete note"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
+          <ul className="divide-y divide-border">
+            {filtered.map((note) => (
+              <li key={note.id} className={`py-3 ${note.id === editingId ? 'bg-accent/5 -mx-2 px-2 rounded-lg' : ''}`}>
+                <div className="flex items-start justify-between gap-3">
+                  <button
+                    onClick={() => {
+                      setEditingId(note.id);
+                      setDraft(note.content);
+                    }}
+                    className="text-left min-w-0 flex-1"
+                  >
+                    <p className="font-medium text-fg truncate">{note.problemTitle}</p>
+                    <p className="text-xs text-fg-subtle">
+                      {languageLabel(note.language)} · {note.updatedAt}
+                    </p>
+                    <p className="mt-1 text-sm text-fg-muted whitespace-pre-wrap line-clamp-3">{note.content}</p>
+                  </button>
+                  <div className="flex items-center gap-1 shrink-0">
+                    {note.problemText && (
+                      <button onClick={() => onOpenProblem(note)} className="btn-ghost btn-sm" title="Load this problem into the editor">
+                        Open problem
                       </button>
-                    </div>
+                    )}
+                    <button onClick={() => remove(note.id)} className="btn-ghost p-1.5 hover:text-danger" aria-label="Delete note">
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
                   </div>
-
-                  <p className="text-slate-300 whitespace-pre-wrap leading-relaxed line-clamp-3 font-sans">
-                    {note.content}
-                  </p>
                 </div>
-              );
-            })}
-          </div>
+              </li>
+            ))}
+          </ul>
         )}
-      </div>
-
+      </section>
     </div>
   );
 }

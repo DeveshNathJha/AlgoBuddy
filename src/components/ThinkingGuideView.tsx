@@ -1,472 +1,307 @@
 'use client';
 
-import React, { useState } from 'react';
-import { ThinkingGuideData, ProblemApproach } from '@/lib/types';
-import {
-  HelpCircle,
-  Shield,
-  Cpu,
-  GitBranch,
-  ChevronDown,
-  CheckCircle2,
-  Sparkles,
-  Layers,
-  ArrowRight,
-  Code2,
-  RefreshCw,
-  Copy,
-  Check,
-  Zap,
-  Terminal
-} from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { ThinkingGuideData } from '@/lib/types';
+import { Copy, Check, Lock, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
+import FormattedText from './FormattedText';
+import { EmptyState, LoadingState, StaleBanner } from './ViewStates';
 
 interface ThinkingGuideViewProps {
   data: ThinkingGuideData | null;
   isLoading: boolean;
+  isStale?: boolean;
   onGenerate: () => void;
   onLoadStarterCode?: (code: string) => void;
 }
 
-export default function ThinkingGuideView({
-  data,
-  isLoading,
-  onGenerate,
-  onLoadStarterCode,
-}: ThinkingGuideViewProps) {
-  const [revealedLevels, setRevealedLevels] = useState<number[]>([1]);
-  const [selectedApproachIndex, setSelectedApproachIndex] = useState<number>(0);
-  const [copiedSnippet, setCopiedSnippet] = useState<boolean>(false);
+const TIER_LABEL: Record<string, string> = { 'brute-force': 'Brute force', better: 'Better', optimal: 'Optimal' };
 
-  const toggleHint = (level: number) => {
-    if (revealedLevels.includes(level)) {
-      setRevealedLevels(revealedLevels.filter((l) => l !== level));
-    } else {
-      setRevealedLevels([...revealedLevels, level]);
-    }
-  };
+/** One numbered step of the guide. */
+function Step({ n, title, hint, action, children }: { n: number; title: string; hint?: string; action?: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <section className="card p-5">
+      <div className="flex items-start justify-between gap-3 mb-3">
+        <div className="flex items-start gap-3">
+          <span className="w-6 h-6 rounded-full bg-accent/10 text-accent-text text-xs font-semibold flex items-center justify-center shrink-0 mt-0.5">
+            {n}
+          </span>
+          <div>
+            <h3 className="text-[15px] font-semibold text-fg">{title}</h3>
+            {hint && <p className="text-sm text-fg-subtle">{hint}</p>}
+          </div>
+        </div>
+        {action}
+      </div>
+      <div className="pl-9">{children}</div>
+    </section>
+  );
+}
 
-  const revealNextHint = () => {
-    const nextLevel = (revealedLevels[revealedLevels.length - 1] || 0) + 1;
-    if (nextLevel <= 4) {
-      setRevealedLevels([...revealedLevels, nextLevel]);
-    }
-  };
+function BulletList({ items }: { items: string[] }) {
+  return (
+    <ul className="space-y-2">
+      {items.map((item, i) => (
+        <li key={i} className="flex gap-2.5">
+          <span className="mt-[9px] w-1.5 h-1.5 rounded-full bg-fg-subtle shrink-0" />
+          <FormattedText text={item} />
+        </li>
+      ))}
+    </ul>
+  );
+}
 
-  const handleCopy = (text: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedSnippet(true);
-    toast.success('Code copied to clipboard!');
-    setTimeout(() => setCopiedSnippet(false), 2000);
-  };
+function NumberedList({ items }: { items: string[] }) {
+  return (
+    <ol className="space-y-2">
+      {items.map((item, i) => (
+        <li key={i} className="flex gap-2.5">
+          <span className="text-fg-subtle tabular-nums w-5 shrink-0 text-right">{i + 1}.</span>
+          <FormattedText text={item} />
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+export default function ThinkingGuideView({ data, isLoading, isStale, onGenerate, onLoadStarterCode }: ThinkingGuideViewProps) {
+  const [revealedCount, setRevealedCount] = useState(0);
+  const [approachIdx, setApproachIdx] = useState(0);
+  const [showSolutions, setShowSolutions] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    setRevealedCount(0);
+    setApproachIdx(0);
+    setShowSolutions(false);
+  }, [data]);
 
   if (isLoading) {
-    return (
-      <div className="h-full flex flex-col items-center justify-center p-12 text-center bg-slate-900/40 rounded-2xl border border-slate-800">
-        <div className="relative mb-4">
-          <div className="w-12 h-12 rounded-full border-2 border-indigo-500/20 border-t-indigo-500 animate-spin" />
-          <Cpu className="w-6 h-6 text-indigo-400 absolute inset-0 m-auto" />
-        </div>
-        <h3 className="text-sm font-semibold text-white">Decomposing Problem Structure...</h3>
-        <p className="text-xs text-slate-400 max-w-sm mt-1 leading-relaxed">
-          Formulating pattern recognition, multiple algorithmic approaches (Brute Force $\rightarrow$ Optimal), and concrete implementation steps.
-        </p>
-      </div>
-    );
+    return <LoadingState title="Breaking the problem down..." detail="Reading the constraints, finding the pattern and preparing hints. This usually takes 10 to 30 seconds." />;
   }
 
   if (!data) {
     return (
-      <div className="h-full flex flex-col items-center justify-center p-8 text-center bg-slate-900/40 rounded-2xl border border-slate-800/80">
-        <div className="p-4 rounded-2xl bg-indigo-600/10 text-indigo-400 border border-indigo-500/20 mb-4">
-          <Layers className="w-8 h-8" />
-        </div>
-        <h3 className="text-base font-semibold text-white">Algorithmic Thinking Guide</h3>
-        <p className="text-xs text-slate-400 max-w-md mt-1 mb-5 leading-relaxed">
-          Input your problem statement and click &quot;Generate Thinking Guide&quot; to inspect multi-tier approaches, pattern logic, and progressive hints rather than memorizing solutions.
-        </p>
-        <button
-          onClick={onGenerate}
-          className="px-5 py-2.5 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white shadow-md shadow-indigo-600/20 transition flex items-center gap-2"
-        >
-          <Sparkles className="w-4 h-4" /> Generate Thinking Guide
-        </button>
-      </div>
+      <EmptyState
+        title="How to Think"
+        description="A step-by-step way into the problem: what it asks, what the constraints tell you, which pattern fits, hints to try on your own, and only then the solutions."
+        actionLabel="Generate thinking guide"
+        onAction={onGenerate}
+      />
     );
   }
 
-  const approaches = (Array.isArray(data.approaches) && data.approaches.length > 0)
-    ? data.approaches
-    : [
-        {
-          approachName: 'Approach 1: Brute Force',
-          tier: 'brute-force' as const,
-          timeComplexity: data.bruteForce?.timeComplexity || 'O(N^2)',
-          spaceComplexity: data.bruteForce?.spaceComplexity || 'O(1)',
-          intuition: data.bruteForce?.approach || 'Check all possibilities',
-          stepByStepAlgorithm: [data.bruteForce?.approach || 'Exhaustive nested check'],
-          pseudocodeOrSnippet: '',
-          tradeoffsAndDrawbacks: data.bruteForce?.drawback || 'Too slow for large N',
-        },
-        {
-          approachName: 'Approach 2: Optimal Solution',
-          tier: 'optimal' as const,
-          timeComplexity: data.optimizedApproach?.timeComplexity || 'O(N)',
-          spaceComplexity: data.optimizedApproach?.spaceComplexity || 'O(1)',
-          intuition: data.optimizedApproach?.keyIntuition || 'Direct optimal lookup',
-          stepByStepAlgorithm: [data.optimizedApproach?.approach || 'Optimal single pass traversal'],
-          pseudocodeOrSnippet: '',
-          tradeoffsAndDrawbacks: 'Optimal time complexity',
-        },
-      ];
-
-  const currentApproach = approaches[selectedApproachIndex] || approaches[0] || {
-    approachName: 'Approach',
-    tier: 'optimal',
-    timeComplexity: 'O(N)',
-    spaceComplexity: 'O(1)',
-    intuition: 'Algorithmic approach',
-    stepByStepAlgorithm: ['Initialize variables', 'Process elements', 'Return output'],
-    pseudocodeOrSnippet: '',
-    tradeoffsAndDrawbacks: '',
-  };
-
-  const coreConstraints = Array.isArray(data.coreConstraints) ? data.coreConstraints : [];
-  const recognizedPatterns = Array.isArray(data.recognizedPatterns) ? data.recognizedPatterns : [];
-  const edgeCases = Array.isArray(data.edgeCases) ? data.edgeCases : [];
-  const hints = Array.isArray(data.hints) ? data.hints : [];
+  const approaches = data.approaches;
+  const current = approaches[Math.min(approachIdx, approaches.length - 1)];
   const blueprint = data.implementationBlueprint;
-  const dataStructures = Array.isArray(blueprint?.dataStructuresNeeded) ? blueprint.dataStructuresNeeded : [];
-  const algorithmSteps = Array.isArray(blueprint?.algorithmSteps) ? blueprint.algorithmSteps : [];
-  const stepByStepAlgorithm = Array.isArray(currentApproach.stepByStepAlgorithm) ? currentApproach.stepByStepAlgorithm : [];
+  let n = 0;
+
+  const copy = (text: string) =>
+    navigator.clipboard.writeText(text).then(
+      () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      },
+      () => toast.error('Could not copy to clipboard.')
+    );
 
   return (
-    <div className="space-y-6 pb-12">
-
-      {/* Top Action Header with Always-Available Regenerate Button */}
-      <div className="p-4 rounded-2xl bg-slate-900/90 border border-slate-800 flex items-center justify-between gap-3 shadow-sm">
+    <div className="space-y-4 pb-12 text-[15px] leading-7 text-fg-muted">
+      <div className="flex items-center justify-between gap-3">
         <div>
-          <span className="text-xs font-bold text-white flex items-center gap-2">
-            <Layers className="w-4 h-4 text-indigo-400" />
-            <span>Algorithmic Thinking Guide</span>
-          </span>
-          <p className="text-[11px] text-slate-400">
-            Multi-approach analysis &amp; step-by-step implementation bridge
-          </p>
+          <h2 className="text-lg font-semibold text-fg">How to Think</h2>
+          <p className="text-sm text-fg-subtle">Go step by step. Try each hint yourself before opening the solutions.</p>
         </div>
-
-        <button
-          onClick={onGenerate}
-          disabled={isLoading}
-          className="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white shadow-md shadow-indigo-600/20 transition flex items-center gap-1.5 shrink-0"
-          title="Re-run analysis for the current problem statement"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
-          <span>Regenerate Guide</span>
+        <button onClick={onGenerate} className="btn-secondary btn-sm shrink-0">
+          <RefreshCw className="w-3.5 h-3.5" /> Regenerate
         </button>
       </div>
 
-      {/* 1. Simplified Restatement */}
-      <div className="p-5 rounded-2xl bg-slate-900/70 border border-slate-800 shadow-sm">
-        <div className="flex items-center gap-2 text-indigo-400 text-xs font-bold uppercase tracking-wider mb-2">
-          <HelpCircle className="w-4 h-4" />
-          <span>1. Problem Restatement</span>
-        </div>
-        <p className="text-xs text-slate-200 leading-relaxed font-sans">
-          {data.simplifiedProblem}
-        </p>
-      </div>
+      {isStale && <StaleBanner text="The problem changed after this guide was made." onRegenerate={onGenerate} />}
 
-      {/* 2. Constraints & Pattern Recognition */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {/* Constraints */}
-        <div className="p-4 rounded-2xl bg-slate-900/50 border border-slate-800">
-          <div className="flex items-center gap-2 text-amber-400 text-xs font-bold uppercase tracking-wider mb-3">
-            <Shield className="w-4 h-4" />
-            <span>Constraints &amp; Invariants</span>
-          </div>
-          <ul className="space-y-2">
-            {coreConstraints.map((c, i) => (
-              <li
-                key={i}
-                className="text-xs text-slate-300 flex items-start gap-2 bg-slate-950/60 p-2.5 rounded-xl border border-slate-800/60"
-              >
-                <span className="text-amber-400 font-bold">•</span>
-                <span>{c}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
+      {data.simplifiedProblem && (
+        <Step n={++n} title="Understand the problem" hint="Say it back in your own words before solving.">
+          <FormattedText text={data.simplifiedProblem} className="text-fg" />
+        </Step>
+      )}
 
-        {/* Recognized Patterns */}
-        <div className="p-4 rounded-2xl bg-slate-900/50 border border-slate-800">
-          <div className="flex items-center gap-2 text-emerald-400 text-xs font-bold uppercase tracking-wider mb-3">
-            <Cpu className="w-4 h-4" />
-            <span>Pattern Recognition</span>
-          </div>
-          <div className="space-y-2.5">
-            {recognizedPatterns.map((p, i) => (
-              <div key={i} className="bg-slate-950/60 p-3 rounded-xl border border-slate-800/60">
-                <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 mb-1.5 font-mono">
-                  {p.patternName}
-                </span>
-                <p className="text-xs text-slate-300 leading-relaxed">{p.whyThisPattern}</p>
+      {data.coreConstraints.length > 0 && (
+        <Step n={++n} title="Read the constraints" hint="Input size tells you which time complexity is acceptable.">
+          <BulletList items={data.coreConstraints} />
+        </Step>
+      )}
+
+      {data.recognizedPatterns.length > 0 && (
+        <Step n={++n} title="Spot the pattern" hint="Which clue in the problem points to a known technique?">
+          <div className="space-y-3">
+            {data.recognizedPatterns.map((p, i) => (
+              <div key={i}>
+                <p className="font-semibold text-fg">{p.patternName}</p>
+                {p.whyThisPattern && <FormattedText text={p.whyThisPattern} />}
               </div>
             ))}
           </div>
-        </div>
-      </div>
+        </Step>
+      )}
 
-      {/* 3. MULTIPLE APPROACHES (Brute Force -> Better -> Optimal) */}
-      <div className="p-5 rounded-2xl bg-slate-900/60 border border-slate-800 shadow-sm space-y-4">
-        <div className="flex items-center justify-between flex-wrap gap-2">
-          <div className="flex items-center gap-2 text-indigo-400 text-xs font-bold uppercase tracking-wider">
-            <GitBranch className="w-4 h-4" />
-            <span>2. Multiple Approaches ({approaches.length} Explored)</span>
-          </div>
-          <span className="text-[11px] text-slate-400 font-sans">
-            Compare progression from naive to production-grade
-          </span>
-        </div>
-
-        {/* Approach Selector Tabs */}
-        <div className="flex items-center gap-2 overflow-x-auto pb-1">
-          {approaches.map((app: ProblemApproach, idx: number) => {
-            const isSelected = idx === selectedApproachIndex;
-            const badgeColor =
-              app.tier === 'optimal'
-                ? 'text-emerald-400 border-emerald-500/30 bg-emerald-950/40'
-                : app.tier === 'better'
-                ? 'text-amber-400 border-amber-500/30 bg-amber-950/40'
-                : 'text-rose-400 border-rose-500/30 bg-rose-950/40';
-
-            return (
-              <button
-                key={idx}
-                onClick={() => setSelectedApproachIndex(idx)}
-                className={`px-3.5 py-2 rounded-xl text-xs font-semibold border transition flex items-center gap-2 shrink-0 ${
-                  isSelected
-                    ? `${badgeColor} ring-1 ring-indigo-500/50 shadow-sm`
-                    : 'bg-slate-950/60 border-slate-800 text-slate-400 hover:text-white'
-                }`}
-              >
-                <span>{app.approachName}</span>
-                <span className="font-mono text-[10px] px-1.5 py-0.2 rounded bg-black/40">
-                  {app.timeComplexity}
-                </span>
+      {data.hints.length > 0 && (
+        <Step
+          n={++n}
+          title="Try it with hints"
+          hint="Open one hint at a time. Stop as soon as you can continue on your own."
+          action={
+            revealedCount > 0 ? (
+              <button onClick={() => setRevealedCount(0)} className="btn-ghost btn-sm shrink-0">
+                Hide all
               </button>
-            );
-          })}
-        </div>
-
-        {/* Active Approach Card */}
-        <div className="p-4 rounded-xl bg-slate-950 border border-slate-800/90 space-y-4">
-          <div className="flex items-center justify-between flex-wrap gap-2 pb-2 border-b border-slate-800/80">
-            <div>
-              <h4 className="text-sm font-bold text-white">{currentApproach.approachName}</h4>
-              <p className="text-xs text-slate-300 mt-1 leading-relaxed">
-                {currentApproach.intuition}
-              </p>
-            </div>
-
-            <div className="flex items-center gap-2 font-mono">
-              <span className="text-xs px-2 py-0.5 rounded bg-indigo-950/60 text-indigo-300 border border-indigo-800/40">
-                Time: {currentApproach.timeComplexity}
-              </span>
-              <span className="text-xs px-2 py-0.5 rounded bg-slate-900 text-slate-300 border border-slate-800">
-                Space: {currentApproach.spaceComplexity}
-              </span>
-            </div>
-          </div>
-
-          {/* Step-by-Step Algorithm */}
+            ) : undefined
+          }
+        >
           <div className="space-y-2">
-            <span className="text-[11px] font-bold text-indigo-300 uppercase tracking-wider block">
-              Step-by-Step Algorithmic Logic
-            </span>
-            <div className="space-y-1.5">
-              {stepByStepAlgorithm.map((step, sIdx) => (
-                <div
-                  key={sIdx}
-                  className="flex items-start gap-2.5 text-xs text-slate-300 bg-slate-900/60 p-2.5 rounded-lg border border-slate-800/50"
-                >
-                  <span className="w-5 h-5 rounded-full bg-indigo-600/20 text-indigo-400 border border-indigo-500/30 flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">
-                    {sIdx + 1}
-                  </span>
-                  <span className="leading-relaxed">{step}</span>
+            {data.hints.map((hint, idx) => {
+              const revealed = idx < revealedCount;
+              const isNext = idx === revealedCount;
+              return (
+                <div key={idx} className={`rounded-lg border px-3.5 py-2.5 ${revealed ? 'border-border bg-surface-2' : 'border-dashed border-border'}`}>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className={`text-sm font-medium ${revealed ? 'text-fg' : 'text-fg-subtle'}`}>
+                      Hint {idx + 1}: {hint.title}
+                    </span>
+                    {isNext ? (
+                      <button onClick={() => setRevealedCount(idx + 1)} className="btn-secondary btn-sm">
+                        Show hint
+                      </button>
+                    ) : !revealed ? (
+                      <Lock className="w-3.5 h-3.5 text-fg-subtle" aria-label="Open the previous hint first" />
+                    ) : null}
+                  </div>
+                  {revealed && <FormattedText text={hint.content} className="block mt-1.5 text-fg" />}
                 </div>
+              );
+            })}
+          </div>
+        </Step>
+      )}
+
+      <Step
+        n={++n}
+        title="Compare approaches"
+        hint="From the obvious idea to the optimal one."
+        action={
+          <button onClick={() => setShowSolutions((s) => !s)} className={showSolutions ? 'btn-ghost btn-sm shrink-0' : 'btn-primary btn-sm shrink-0'}>
+            {showSolutions ? 'Hide solutions' : 'Show solutions'}
+          </button>
+        }
+      >
+        {!showSolutions ? (
+          <p className="text-sm text-fg-subtle">Hidden so you can think first. {approaches.length} approaches are ready when you are.</p>
+        ) : (
+          <div className="space-y-4">
+            <div className="flex gap-1 p-1 rounded-lg bg-surface-2 w-fit max-w-full overflow-x-auto" role="tablist">
+              {approaches.map((a, idx) => (
+                <button
+                  key={idx}
+                  role="tab"
+                  aria-selected={idx === approachIdx}
+                  onClick={() => setApproachIdx(idx)}
+                  className={`px-3 py-1 rounded-md text-sm whitespace-nowrap transition ${
+                    idx === approachIdx ? 'bg-surface text-fg shadow-sm font-medium' : 'text-fg-muted hover:text-fg'
+                  }`}
+                >
+                  {idx + 1}. {TIER_LABEL[a.tier]}
+                  {a.timeComplexity && <span className="ml-1.5 font-mono text-xs text-fg-subtle">{a.timeComplexity}</span>}
+                </button>
               ))}
             </div>
-          </div>
 
-          {/* Code / Logic Snippet (if available) */}
-          {currentApproach.pseudocodeOrSnippet && (
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between text-[11px] text-slate-400">
-                <span className="font-semibold text-slate-300">Algorithmic Logic Snippet:</span>
-                <button
-                  onClick={() => handleCopy(currentApproach.pseudocodeOrSnippet)}
-                  className="hover:text-white transition flex items-center gap-1 text-[10px]"
-                >
-                  {copiedSnippet ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
-                  <span>{copiedSnippet ? 'Copied' : 'Copy'}</span>
-                </button>
+            <div className="space-y-4">
+              <div>
+                <h4 className="font-semibold text-fg">{current.approachName}</h4>
+                <p className="text-sm text-fg-subtle font-mono">
+                  {current.timeComplexity && <>Time {current.timeComplexity}</>}
+                  {current.timeComplexity && current.spaceComplexity && ' · '}
+                  {current.spaceComplexity && <>Space {current.spaceComplexity}</>}
+                </p>
               </div>
-              <pre className="p-3 rounded-lg bg-slate-900 border border-slate-800 font-mono text-xs text-indigo-200 overflow-x-auto whitespace-pre">
-                {currentApproach.pseudocodeOrSnippet}
-              </pre>
-            </div>
-          )}
 
-          {/* Tradeoffs & Drawbacks */}
-          <div className="p-3 rounded-lg bg-slate-900/60 border border-slate-800/60 text-xs">
-            <span className="font-semibold text-slate-300 block mb-0.5">Tradeoff Assessment:</span>
-            <p className="text-slate-400 leading-relaxed">{currentApproach.tradeoffsAndDrawbacks}</p>
+              {current.intuition && (
+                <div>
+                  <p className="section-label mb-1">Idea</p>
+                  <FormattedText text={current.intuition} className="text-fg" />
+                </div>
+              )}
+
+              {current.stepByStepAlgorithm.length > 0 && (
+                <div>
+                  <p className="section-label mb-1">Steps</p>
+                  <NumberedList items={current.stepByStepAlgorithm} />
+                </div>
+              )}
+
+              {current.pseudocodeOrSnippet && (
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <p className="section-label">Code sketch</p>
+                    <button onClick={() => copy(current.pseudocodeOrSnippet)} className="btn-ghost btn-sm">
+                      {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />} {copied ? 'Copied' : 'Copy'}
+                    </button>
+                  </div>
+                  <pre className="code-block">{current.pseudocodeOrSnippet}</pre>
+                </div>
+              )}
+
+              {current.tradeoffsAndDrawbacks && (
+                <div>
+                  <p className="section-label mb-1">Trade-off</p>
+                  <FormattedText text={current.tradeoffsAndDrawbacks} />
+                </div>
+              )}
+            </div>
           </div>
-        </div>
-      </div>
+        )}
+      </Step>
 
-      {/* 4. IMPLEMENTATION BLUEPRINT (The Bridge to Code) */}
-      {data.implementationBlueprint && (
-        <div className="p-5 rounded-2xl bg-indigo-950/20 border border-indigo-900/40 space-y-4">
-          <div className="flex items-center justify-between flex-wrap gap-2">
-            <div className="flex items-center gap-2 text-indigo-300 text-xs font-bold uppercase tracking-wider">
-              <Code2 className="w-4 h-4 text-indigo-400" />
-              <span>3. Implementation Blueprint (Bridge to Code)</span>
-            </div>
-            {onLoadStarterCode && data.implementationBlueprint.starterCodeTemplate && (
-              <button
-                onClick={() => {
-                  onLoadStarterCode(data.implementationBlueprint!.starterCodeTemplate);
-                  toast.success('Starter scaffold loaded into editor!');
-                }}
-                className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-sm transition flex items-center gap-1.5"
-                title="Load starter template directly into the Monaco editor"
-              >
-                <Terminal className="w-3.5 h-3.5" />
-                <span>Load Template into Editor</span>
+      {blueprint && (blueprint.dataStructuresNeeded.length > 0 || blueprint.algorithmSteps.length > 0 || blueprint.starterCodeTemplate.trim()) && (
+        <Step
+          n={++n}
+          title="Turn it into code"
+          hint="What to set up, and the order to write it in."
+          action={
+            onLoadStarterCode && blueprint.starterCodeTemplate.trim() ? (
+              <button onClick={() => onLoadStarterCode(blueprint.starterCodeTemplate)} className="btn-secondary btn-sm shrink-0">
+                Load starter code
               </button>
+            ) : undefined
+          }
+        >
+          <div className="grid gap-5 md:grid-cols-2">
+            {blueprint.dataStructuresNeeded.length > 0 && (
+              <div>
+                <p className="section-label mb-1">Data structures</p>
+                <BulletList items={blueprint.dataStructuresNeeded} />
+              </div>
+            )}
+            {blueprint.algorithmSteps.length > 0 && (
+              <div>
+                <p className="section-label mb-1">Coding order</p>
+                <NumberedList items={blueprint.algorithmSteps} />
+              </div>
             )}
           </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {/* Required Data Structures */}
-            <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800/80">
-              <span className="text-[11px] font-bold text-slate-300 uppercase tracking-wider block mb-2">
-                Required Data Structures
-              </span>
-              <ul className="space-y-1.5">
-                {dataStructures.map((ds, i) => (
-                  <li key={i} className="text-xs text-slate-300 flex items-center gap-2">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                    <span>{ds}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-
-            {/* Execution Steps */}
-            <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800/80">
-              <span className="text-[11px] font-bold text-slate-300 uppercase tracking-wider block mb-2">
-                Coding Action Checklist
-              </span>
-              <ul className="space-y-1.5">
-                {algorithmSteps.map((step, i) => (
-                  <li key={i} className="text-xs text-slate-300 flex items-start gap-2">
-                    <ArrowRight className="w-3.5 h-3.5 text-indigo-400 shrink-0 mt-0.5" />
-                    <span className="leading-relaxed">{step}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 5. Progressive Hints System */}
-      <div className="p-5 rounded-2xl bg-slate-900/50 border border-slate-800">
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2 text-indigo-400 text-xs font-bold uppercase tracking-wider">
-            <Sparkles className="w-4 h-4" />
-            <span>4. Progressive Hints (Active Recall)</span>
-          </div>
-          {revealedLevels.length < 4 && (
-            <button
-              onClick={revealNextHint}
-              className="text-xs px-3 py-1 rounded-lg bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600/30 border border-indigo-500/30 transition flex items-center gap-1.5 font-medium"
-            >
-              <span>Reveal Next Level</span>
-              <ChevronDown className="w-3.5 h-3.5" />
-            </button>
+          {blueprint.starterCodeTemplate.trim() && (
+            <details className="mt-4">
+              <summary className="cursor-pointer text-sm font-medium text-accent-text select-none">Preview starter code</summary>
+              <pre className="code-block mt-2">{blueprint.starterCodeTemplate}</pre>
+            </details>
           )}
-        </div>
-
-        <p className="text-xs text-slate-400 mb-4">
-          Test your problem-solving process by stepping through guidance levels sequentially before inspecting full implementations:
-        </p>
-
-        <div className="space-y-3">
-          {hints.map((hint) => {
-            const isRevealed = revealedLevels.includes(hint.level);
-            return (
-              <div
-                key={hint.level}
-                className={`rounded-xl border transition-all ${
-                  isRevealed
-                    ? 'bg-slate-950 border-slate-700/80 p-4'
-                    : 'bg-slate-950/40 border-slate-800/50 p-3 opacity-60'
-                }`}
-              >
-                <div
-                  onClick={() => toggleHint(hint.level)}
-                  className="flex items-center justify-between cursor-pointer select-none"
-                >
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${
-                        isRevealed ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400'
-                      }`}
-                    >
-                      {hint.level}
-                    </span>
-                    <span className="text-xs font-semibold text-slate-200">{hint.title}</span>
-                  </div>
-                  <span className="text-[11px] text-indigo-400 font-medium">
-                    {isRevealed ? 'Hide' : 'Reveal'}
-                  </span>
-                </div>
-
-                {isRevealed && (
-                  <p className="mt-2.5 text-xs text-slate-300 leading-relaxed font-sans pl-7">
-                    {hint.content}
-                  </p>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* 6. Edge Cases Checklist */}
-      {edgeCases.length > 0 && (
-        <div className="p-4 rounded-2xl bg-slate-900/50 border border-slate-800">
-          <span className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-2">
-            5. Edge Cases &amp; Boundary Conditions
-          </span>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            {edgeCases.map((edge, i) => (
-              <div
-                key={i}
-                className="flex items-center gap-2 text-xs text-slate-300 bg-slate-950/60 p-2.5 rounded-lg border border-slate-800/60"
-              >
-                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                <span>{edge}</span>
-              </div>
-            ))}
-          </div>
-        </div>
+        </Step>
       )}
 
+      {data.edgeCases.length > 0 && (
+        <Step n={++n} title="Test the edge cases" hint="Dry-run these before you say you are done.">
+          <BulletList items={data.edgeCases} />
+        </Step>
+      )}
     </div>
   );
 }

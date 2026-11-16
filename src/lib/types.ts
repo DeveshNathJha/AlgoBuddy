@@ -1,45 +1,30 @@
 /**
- * AlgoBuddy - Core Type Definitions
- * Professional type definitions for execution tracing, AI analysis, notes, and multi-language settings.
+ * AlgoBuddy - Core type definitions.
  */
-
-// ==========================================
-// PROGRAMMING LANGUAGES & PROVIDERS
-// ==========================================
 
 export type ProgrammingLanguage = 'python' | 'java' | 'cpp' | 'javascript';
 
 export type AIProvider = 'gemini' | 'groq' | 'openai';
 
-export interface ProviderConfig {
-  provider: AIProvider;
-  apiKey: string;
-  model: string;
+export interface FreeQuota {
+  used: number;
+  limit: number;
 }
 
-// ==========================================
-// PERSONAL NOTES SYSTEM
-// ==========================================
+// ── Notes ──────────────────────────────────────
 
 export interface ProblemNote {
   id: string;
   problemTitle: string;
+  /** Full problem statement, so "Open problem" can restore it. Optional for notes saved by older versions. */
+  problemText?: string;
   content: string;
   language: ProgrammingLanguage;
   createdAt: string;
   updatedAt: string;
 }
 
-// ==========================================
-// 1. PYTHON DRY RUN TRACE TYPES
-// ==========================================
-
-export interface VariableSnapshot {
-  name: string;
-  value: string;
-  type: string;
-  isChanged?: boolean;
-}
+// ── Python dry-run trace ───────────────────────
 
 export interface StackFrame {
   functionName: string;
@@ -50,17 +35,16 @@ export interface StackFrame {
 export interface TraceStep {
   stepIndex: number;
   lineNumber: number;
-  event: 'line' | 'call' | 'return';
+  event: 'line' | 'return' | 'exception';
   functionName: string;
   variables: Record<string, string>;
   changedVariables: string[];
   callStack: StackFrame[];
   stdoutSoFar: string;
-  loopInfo?: {
-    isLoopHeader: boolean;
-    iteration?: number;
-    totalIterationsEstimate?: number;
-  };
+  /** Present on 'return' steps. */
+  returnValue?: string;
+  /** How many times this line has run so far (1 on first run). */
+  iteration: number;
 }
 
 export interface TraceResult {
@@ -68,20 +52,25 @@ export interface TraceResult {
   steps: TraceStep[];
   totalSteps: number;
   stdout: string;
-  error?: string;
+  error?: string | null;
+  /** Line where the error was raised, if known. */
+  errorLine?: number | null;
+  /** True when execution was stopped because of the step limit. */
+  truncated?: boolean;
+  /** True when the Python runtime itself failed (not the student's code). */
+  runnerError?: boolean;
   executionTimeMs: number;
   lineHitCounts: Record<number, number>;
+  /** Exact code that was traced, so highlights stay correct if the editor changes later. */
+  sourceCode: string;
 }
 
-// ==========================================
-// 2. THINKING GUIDE TYPES
-// ==========================================
+// ── Thinking guide ─────────────────────────────
 
 export interface ProgressiveHint {
   level: number;
   title: string;
   content: string;
-  revealed: boolean;
 }
 
 export interface ProblemApproach {
@@ -104,31 +93,14 @@ export interface ImplementationBlueprint {
 export interface ThinkingGuideData {
   simplifiedProblem: string;
   coreConstraints: string[];
-  recognizedPatterns: {
-    patternName: string;
-    whyThisPattern: string;
-  }[];
-  approaches?: ProblemApproach[];
-  bruteForce: {
-    approach: string;
-    timeComplexity: string;
-    spaceComplexity: string;
-    drawback: string;
-  };
-  optimizedApproach: {
-    approach: string;
-    timeComplexity: string;
-    spaceComplexity: string;
-    keyIntuition: string;
-  };
+  recognizedPatterns: { patternName: string; whyThisPattern: string }[];
+  approaches: ProblemApproach[];
   implementationBlueprint?: ImplementationBlueprint;
   edgeCases: string[];
   hints: ProgressiveHint[];
 }
 
-// ==========================================
-// 3. INTERVIEW SCRIPT TYPES
-// ==========================================
+// ── Interview script ───────────────────────────
 
 export interface ScriptSection {
   id: string;
@@ -146,22 +118,7 @@ export interface InterviewScriptData {
   proTips: string[];
 }
 
-// ==========================================
-// 4. PRESETS & INPUT TYPES
-// ==========================================
-
-export interface DsaPreset {
-  id: string;
-  title: string;
-  difficulty: 'Easy' | 'Medium' | 'Hard';
-  description: string;
-  defaultCode: string;
-  codeByLanguage?: Partial<Record<ProgrammingLanguage, string>>;
-}
-
-// ==========================================
-// 5. CODE DOCTOR / DEBUGGER & CHECKER TYPES
-// ==========================================
+// ── Code Doctor ────────────────────────────────
 
 export interface CodeCheckBug {
   lineNumber?: number;
@@ -175,10 +132,12 @@ export interface CodeCheckBug {
 export interface CodeCheckResult {
   status: 'clean' | 'issues_found';
   summary: string;
-  overallScore: number; // e.g. 85 / 100
+  /** 0-100, or null if the model did not score it. */
+  overallScore: number | null;
   timeComplexity: string;
   spaceComplexity: string;
   bugs: CodeCheckBug[];
+  /** Empty string means no change was suggested. */
   fixedFullCode: string;
   learningAdvice: string;
 }

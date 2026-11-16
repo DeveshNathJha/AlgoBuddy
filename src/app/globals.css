@@ -2,34 +2,95 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Theme tokens (RGB triplets so Tailwind opacity modifiers work) ── */
 :root {
-  --background: #090d16;
-  --foreground: #f1f5f9;
+  --bg: 246 247 249;
+  --surface: 255 255 255;
+  --surface-2: 241 243 246;
+  --border: 222 226 232;
+  --fg: 17 24 39;
+  --fg-muted: 75 85 99;
+  --fg-subtle: 107 114 128;
+  --accent: 79 70 229;
+  --accent-text: 67 56 202;
+  --success: 4 120 87;
+  --warning: 161 98 7;
+  --danger: 190 18 60;
+  color-scheme: light;
+}
+
+[data-theme='dark'] {
+  --bg: 13 17 23;
+  --surface: 22 27 34;
+  --surface-2: 30 36 45;
+  --border: 48 54 64;
+  --fg: 230 233 238;
+  --fg-muted: 160 168 180;
+  --fg-subtle: 125 133 146;
+  --accent: 88 80 236;
+  --accent-text: 165 170 255;
+  --success: 74 201 145;
+  --warning: 232 182 76;
+  --danger: 248 113 133;
+  color-scheme: dark;
+}
+
+html,
+body {
+  background: rgb(var(--bg));
+  color: rgb(var(--fg));
 }
 
 body {
-  color: var(--foreground);
-  background: var(--background);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
 }
 
-/* Custom Sleek Scrollbar */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+::selection {
+  background: rgb(var(--accent) / 0.25);
 }
 
-::-webkit-scrollbar-track {
-  background: #0f172a;
+/* Slim scrollbars that follow the theme */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--border)) transparent;
 }
 
-::-webkit-scrollbar-thumb {
-  background: #334155;
-  border-radius: 9999px;
+@layer components {
+  .card {
+    @apply rounded-xl border border-border bg-surface;
+  }
+  .section-label {
+    @apply text-xs font-semibold uppercase tracking-wide text-fg-subtle;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition
+      focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50
+      disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn bg-accent text-white hover:bg-accent/90;
+  }
+  .btn-secondary {
+    @apply btn border border-border bg-surface-2 text-fg hover:bg-border/50;
+  }
+  .btn-ghost {
+    @apply btn text-fg-muted hover:bg-surface-2 hover:text-fg;
+  }
+  .btn-sm {
+    @apply px-2.5 py-1 text-xs;
+  }
+  .input {
+    @apply w-full rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-fg
+      placeholder:text-fg-subtle focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25;
+  }
+  .chip {
+    @apply inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium;
+  }
+  .inline-code {
+    @apply rounded border border-border bg-surface-2 px-1.5 py-0.5 font-mono text-[0.9em] text-fg;
+  }
+  .code-block {
+    @apply overflow-x-auto whitespace-pre rounded-lg border border-border bg-surface-2 p-3 font-mono text-[13px] leading-6 text-fg;
+  }
 }
-
-::-webkit-scrollbar-thumb:hover {
-  background: #475569;
-}
-

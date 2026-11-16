@@ -1,424 +1,375 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
-import { TraceResult, TraceStep, AIProvider } from '@/lib/types';
-import {
-  Play,
-  Pause,
-  SkipBack,
-  SkipForward,
-  RotateCcw,
-  Sparkles,
-  Layers,
-  Terminal as TerminalIcon,
-  HelpCircle,
-  Repeat
-} from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { TraceResult, TraceStep } from '@/lib/types';
+import { Play, Pause, SkipBack, SkipForward, RotateCcw, Repeat, AlertTriangle } from 'lucide-react';
+import FormattedText from './FormattedText';
+import { EmptyState } from './ViewStates';
+import { explainPythonError } from '@/lib/pythonErrors';
+
+export interface StepExplanation {
+  explanation: string;
+  whyItRan: string;
+}
+
+/** Everything the AI needs to explain the highlighted line (sent to /api/ai/explain-step). */
+export interface ExplainStepPayload {
+  code: string;
+  lineNumber: number;
+  event: TraceStep['event'];
+  functionName: string;
+  iteration: number;
+  variablesBefore: Record<string, string>;
+  variablesAfter: Record<string, string> | null;
+  changedVars: string[];
+  nextAction?: string;
+  returnValue?: string;
+}
 
 interface DryRunVisualizerProps {
   traceResult: TraceResult | null;
-  code: string;
-  provider: AIProvider;
-  userApiKey: string;
+  isOutdated: boolean;
+  isPython: boolean;
+  onExplainStep: (payload: ExplainStepPayload) => Promise<StepExplanation | null>;
+  onDiagnose: () => void;
+  onTryDemo: () => void;
+  demoTitle: string;
+  /** Arrow-key stepping is only active while the Debugger tab is visible. */
+  isActive: boolean;
 }
 
-export default function DryRunVisualizer({
-  traceResult,
-  code,
-  provider,
-  userApiKey,
-}: DryRunVisualizerProps) {
-  const [currentStepIndex, setCurrentStepIndex] = useState<number>(0);
-  const [isPlaying, setIsPlaying] = useState<boolean>(false);
-  const [playbackSpeedMs, setPlaybackSpeedMs] = useState<number>(800);
-  const [clickedLineNumber, setClickedLineNumber] = useState<number | null>(null);
+const fnLabel = (name: string) => (name === '<module>' ? 'main program' : `${name}()`);
 
-  // AI Step Explanation State (Feature D)
-  const [explainingStep, setExplainingStep] = useState<boolean>(false);
-  const [stepExplanation, setStepExplanation] = useState<{
-    explanation: string;
-    whyItRan: string;
-  } | null>(null);
+function buildExplainPayload(code: string, step: TraceStep, next: TraceStep | undefined): ExplainStepPayload {
+  const depth = step.callStack.length;
+  const nextDepth = next?.callStack.length ?? 0;
+  const sameFrame = !!next && nextDepth === depth && next.functionName === step.functionName;
 
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
-  const codeLines = code.split('\n');
+  let nextAction: string | undefined;
+  if (!next) nextAction = 'ends the program';
+  else if (nextDepth > depth) nextAction = `calls ${fnLabel(next.functionName)}`;
+  else if (nextDepth < depth) nextAction = `returns to line ${next.lineNumber} in ${fnLabel(next.functionName)}`;
+  else if (next.lineNumber !== step.lineNumber + 1) nextAction = `jumps to line ${next.lineNumber}`;
+
+  return {
+    code,
+    lineNumber: step.lineNumber,
+    event: step.event,
+    functionName: step.functionName,
+    iteration: step.iteration,
+    variablesBefore: step.variables,
+    // In this tracer a step shows the state BEFORE its line runs, so the effect of
+    // the highlighted line is visible in the NEXT step of the same frame.
+    variablesAfter: sameFrame ? next!.variables : null,
+    changedVars: sameFrame ? next!.changedVariables : [],
+    nextAction,
+    returnValue: step.returnValue,
+  };
+}
+
+export default function DryRunVisualizer({ traceResult, isOutdated, isPython, onExplainStep, onDiagnose, onTryDemo, demoTitle, isActive }: DryRunVisualizerProps) {
+  const [idx, setIdx] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [speedMs, setSpeedMs] = useState(800);
+  const [explaining, setExplaining] = useState(false);
+  const [explanations, setExplanations] = useState<Record<number, StepExplanation>>({});
+  const activeLineRef = useRef<HTMLDivElement | null>(null);
+
+  const steps = traceResult?.steps || [];
+  const lastIndex = Math.max(0, steps.length - 1);
 
   useEffect(() => {
-    setCurrentStepIndex(0);
+    setIdx(0);
     setIsPlaying(false);
-    setStepExplanation(null);
+    setExplanations({});
   }, [traceResult]);
 
-  // Clear step explanation when navigating to a different step
   useEffect(() => {
-    setStepExplanation(null);
-  }, [currentStepIndex]);
+    if (!isPlaying) return;
+    const timer = setInterval(() => {
+      setIdx((prev) => {
+        if (prev >= lastIndex) {
+          setIsPlaying(false);
+          return prev;
+        }
+        return prev + 1;
+      });
+    }, speedMs);
+    return () => clearInterval(timer);
+  }, [isPlaying, speedMs, lastIndex]);
 
   useEffect(() => {
-    if (isPlaying && traceResult && traceResult.steps.length > 0) {
-      timerRef.current = setInterval(() => {
-        setCurrentStepIndex((prev) => {
-          if (prev >= traceResult.steps.length - 1) {
-            setIsPlaying(false);
-            return prev;
-          }
-          return prev + 1;
-        });
-      }, playbackSpeedMs);
-    } else {
-      if (timerRef.current) clearInterval(timerRef.current);
-    }
+    activeLineRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [idx]);
 
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
+  useEffect(() => {
+    if (steps.length === 0 || !isActive) return;
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.closest('input, textarea, select, [contenteditable], .monaco-editor')) return;
+      if (e.key === 'ArrowRight') setIdx((i) => Math.min(lastIndex, i + 1));
+      if (e.key === 'ArrowLeft') setIdx((i) => Math.max(0, i - 1));
     };
-  }, [isPlaying, traceResult, playbackSpeedMs]);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [steps.length, lastIndex, isActive]);
 
-  if (!traceResult || traceResult.steps.length === 0) {
+  if (!traceResult) {
     return (
-      <div className="h-full flex flex-col items-center justify-center p-8 text-center bg-slate-900/40 rounded-2xl border border-slate-800">
-        <div className="p-3.5 rounded-2xl bg-indigo-600/10 text-indigo-400 border border-indigo-500/20 mb-3">
-          <TerminalIcon className="w-8 h-8" />
-        </div>
-        <h3 className="text-base font-semibold text-white">Execution Trace Visualizer</h3>
-        <p className="text-xs text-slate-400 max-w-md mt-1 mb-2">
-          Click <strong>&quot;Run Code &amp; Trace&quot;</strong> in the editor panel to simulate execution step-by-step.
-        </p>
-        <p className="text-[11px] text-slate-400 bg-slate-900/80 px-3 py-1 rounded-full border border-slate-800">
-          Sandboxed WebAssembly runtime via Pyodide. No remote server execution.
-        </p>
-      </div>
+      <EmptyState
+        title="Debugger"
+        description="Click Run & Trace to run your Python code and walk through it one line at a time, with every variable shown at each step."
+        actionLabel={`Try it with the ${demoTitle} solution`}
+        onAction={onTryDemo}
+        note={
+          <>
+            {!isPython && <p className="text-warning mb-1">The Debugger runs Python only. Switch the language to Python 3.</p>}
+            Runs privately in your browser. Your code is never sent to a server for this.
+          </>
+        }
+      />
     );
   }
 
-  const steps = traceResult.steps;
-  const currentStep: TraceStep = steps[currentStepIndex] || steps[0];
-  const activeLineNumber = currentStep.lineNumber;
+  const plainError = traceResult.error && !traceResult.truncated && !traceResult.runnerError ? explainPythonError(traceResult.error) : null;
+  const bannerTitle = traceResult.truncated ? 'Trace stopped' : traceResult.runnerError ? 'Could not run the code' : 'Your code raised an error';
+  const errorBanner = traceResult.error && (
+    <div
+      className={`flex items-start justify-between gap-3 rounded-lg border px-3.5 py-2.5 text-sm ${
+        traceResult.truncated ? 'border-warning/40 bg-warning/10' : 'border-danger/40 bg-danger/10'
+      }`}
+    >
+      <div className="flex items-start gap-2 min-w-0">
+        <AlertTriangle className={`w-4 h-4 shrink-0 mt-0.5 ${traceResult.truncated ? 'text-warning' : 'text-danger'}`} />
+        <div className="min-w-0">
+          <p className="font-medium text-fg">
+            {bannerTitle}
+            {traceResult.errorLine && !traceResult.truncated && !traceResult.runnerError ? ` on line ${traceResult.errorLine}` : ''}
+          </p>
+          {plainError && <FormattedText text={plainError} className="block text-fg-muted" />}
+          {traceResult.runnerError || traceResult.truncated ? (
+            <p className="text-fg-muted">{traceResult.error}</p>
+          ) : (
+            <p className="font-mono text-xs text-fg-subtle break-words mt-0.5">Python says: {traceResult.error}</p>
+          )}
+        </div>
+      </div>
+      {!traceResult.truncated && !traceResult.runnerError && (
+        <button onClick={onDiagnose} className="btn-secondary btn-sm shrink-0">
+          Ask Code Doctor
+        </button>
+      )}
+    </div>
+  );
 
-  const handleJumpNextIteration = () => {
-    for (let i = currentStepIndex + 1; i < steps.length; i++) {
-      if (steps[i].lineNumber === activeLineNumber) {
-        setCurrentStepIndex(i);
-        return;
-      }
+  if (steps.length === 0) return <div className="space-y-4">{errorBanner}</div>;
+
+  const codeLines = traceResult.sourceCode.split('\n');
+  const step = steps[Math.min(idx, lastIndex)];
+  const prev = idx > 0 ? steps[idx - 1] : null;
+  const explanation = explanations[idx];
+  const isErrorStep = !traceResult.success && !traceResult.truncated && idx === lastIndex;
+  const varEntries = Object.entries(step.variables);
+
+  const jumpNextIteration = () => {
+    for (let i = idx + 1; i < steps.length; i++) {
+      if (steps[i].lineNumber === step.lineNumber && steps[i].event === 'line') return setIdx(i);
     }
   };
 
-  const handleExplainCurrentStep = async () => {
-    setExplainingStep(true);
-    setStepExplanation(null);
+  const explain = async () => {
+    setExplaining(true);
     try {
-      const lineText = codeLines[activeLineNumber - 1] || '';
-      const prevStep = currentStepIndex > 0 ? steps[currentStepIndex - 1] : null;
-
-      const res = await fetch('/api/ai/explain-step', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          codeLine: lineText,
-          lineNumber: activeLineNumber,
-          variablesBefore: prevStep ? prevStep.variables : {},
-          variablesAfter: currentStep.variables,
-          changedVars: currentStep.changedVariables,
-          provider,
-          userApiKey: userApiKey || undefined,
-        }),
-      });
-
-      const resData = await res.json();
-      if (resData.success) {
-        setStepExplanation(resData.data);
-      } else {
-        alert(resData.error || 'Failed to explain step.');
-      }
-    } catch (e: any) {
-      alert('Error fetching explanation: ' + e.message);
+      const result = await onExplainStep(buildExplainPayload(traceResult.sourceCode, step, steps[idx + 1]));
+      if (result) setExplanations((e) => ({ ...e, [idx]: result }));
     } finally {
-      setExplainingStep(false);
+      setExplaining(false);
     }
   };
 
   return (
-    <div className="flex flex-col h-full space-y-4">
-      
-      {/* 1. Playback & Scrubber Bar */}
-      <div className="p-3.5 rounded-2xl bg-slate-900/90 border border-slate-800 space-y-3 shadow-sm">
-        
-        {/* Top Row: Step Indicator & Scrubber */}
-        <div className="flex items-center justify-between gap-4">
-          <div className="flex items-center gap-2.5 min-w-[130px]">
-            <span className="text-xs font-semibold text-slate-300">
-              Step <span className="text-indigo-400 font-bold text-sm font-mono">{currentStepIndex + 1}</span> of{' '}
-              <span className="text-slate-400 font-mono">{steps.length}</span>
-            </span>
-
-            {currentStep.loopInfo && currentStep.loopInfo.iteration && currentStep.loopInfo.iteration > 1 && (
-              <span className="px-2 py-0.5 rounded-full text-[11px] font-medium bg-amber-500/10 text-amber-300 border border-amber-500/30 flex items-center gap-1 shrink-0">
-                <Repeat className="w-3 h-3" />
-                Iteration {currentStep.loopInfo.iteration}
-              </span>
-            )}
-          </div>
-
-          <div className="flex items-center gap-3 flex-1 max-w-xs justify-end">
-            <input
-              type="range"
-              min={0}
-              max={steps.length - 1}
-              value={currentStepIndex}
-              onChange={(e) => setCurrentStepIndex(Number(e.target.value))}
-              className="w-full max-w-[160px] h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-indigo-500"
-              title="Step Scrubber"
-            />
-
-            <select
-              value={playbackSpeedMs}
-              onChange={(e) => setPlaybackSpeedMs(Number(e.target.value))}
-              className="bg-slate-950 border border-slate-800 text-[11px] rounded-lg px-2 py-1 text-slate-300 focus:outline-none shrink-0"
-            >
-              <option value={1400}>0.5x</option>
-              <option value={800}>1.0x</option>
-              <option value={400}>2.0x</option>
-            </select>
-          </div>
+    <div className="space-y-4 pb-8">
+      {isOutdated && (
+        <div className="flex items-center gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3.5 py-2 text-sm text-fg">
+          <AlertTriangle className="w-4 h-4 text-warning shrink-0" /> You edited the code after this run. Click Run &amp; Trace again to update.
         </div>
+      )}
+      {errorBanner}
 
-        {/* Bottom Row: Fixed-Position Step Controls */}
-        <div className="flex items-center justify-center pt-2.5 border-t border-slate-800/60">
-          <div className="flex items-center gap-2 bg-slate-950/90 p-1.5 rounded-xl border border-slate-800 shadow-inner">
-            <button
-              onClick={() => setCurrentStepIndex(0)}
-              className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
-              title="Reset to beginning"
-            >
+      {/* Controls */}
+      <section className="card p-3 space-y-2">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div className="flex items-center gap-1">
+            <button onClick={() => setIdx(0)} className="btn-ghost p-2" title="Back to start" aria-label="Back to start">
               <RotateCcw className="w-4 h-4" />
             </button>
-
-            <button
-              onClick={() => setCurrentStepIndex(Math.max(0, currentStepIndex - 1))}
-              disabled={currentStepIndex === 0}
-              className="px-2.5 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 disabled:opacity-30 disabled:hover:bg-transparent transition flex items-center gap-1 text-xs"
-              title="Previous step"
-            >
-              <SkipBack className="w-3.5 h-3.5" />
-              <span>Prev</span>
+            <button onClick={() => setIdx(Math.max(0, idx - 1))} disabled={idx === 0} className="btn-ghost btn-sm" title="Previous step (←)">
+              <SkipBack className="w-3.5 h-3.5" /> Prev
             </button>
-
             <button
-              onClick={() => setIsPlaying(!isPlaying)}
-              className="w-24 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs transition flex items-center justify-center gap-1.5 shadow-sm"
-              title={isPlaying ? 'Pause auto-play' : 'Auto-play execution'}
+              onClick={() => {
+                if (!isPlaying && idx >= lastIndex) setIdx(0);
+                setIsPlaying((p) => !p);
+              }}
+              className="btn-primary btn-sm w-[84px]"
             >
-              {isPlaying ? (
+              {isPlaying ? <Pause className="w-3.5 h-3.5 fill-current" /> : <Play className="w-3.5 h-3.5 fill-current" />}
+              {isPlaying ? 'Pause' : idx >= lastIndex ? 'Replay' : 'Play'}
+            </button>
+            <button onClick={() => setIdx(Math.min(lastIndex, idx + 1))} disabled={idx >= lastIndex} className="btn-ghost btn-sm" title="Next step (→)">
+              Next <SkipForward className="w-3.5 h-3.5" />
+            </button>
+            <button onClick={jumpNextIteration} className="btn-ghost btn-sm" title="Jump to the next time this line runs">
+              <Repeat className="w-3.5 h-3.5" /> Next iteration
+            </button>
+          </div>
+          <select value={speedMs} onChange={(e) => setSpeedMs(Number(e.target.value))} className="input w-auto py-1 text-sm" aria-label="Playback speed">
+            <option value={1600}>0.5x</option>
+            <option value={800}>1x</option>
+            <option value={400}>2x</option>
+            <option value={150}>5x</option>
+          </select>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="text-sm text-fg-muted tabular-nums whitespace-nowrap">
+            Step <span className="font-semibold text-fg">{idx + 1}</span> / {steps.length}
+          </span>
+          <input
+            type="range"
+            min={0}
+            max={lastIndex}
+            value={idx}
+            onChange={(e) => setIdx(Number(e.target.value))}
+            className="flex-1 accent-[rgb(var(--accent))]"
+            aria-label="Step"
+          />
+          <span className="hidden sm:inline text-xs text-fg-subtle whitespace-nowrap">← → keys</span>
+        </div>
+      </section>
+
+      <div className="grid gap-4 xl:grid-cols-12">
+        {/* Code */}
+        <section className="card xl:col-span-7 overflow-hidden">
+          <div className="px-4 py-2 border-b border-border text-sm text-fg-muted flex items-center justify-between gap-2">
+            <span>
+              {step.event === 'return' ? (
                 <>
-                  <Pause className="w-3.5 h-3.5 fill-current" /> Pause
+                  <span className="text-fg font-medium">{fnLabel(step.functionName)}</span> is returning
                 </>
               ) : (
                 <>
-                  <Play className="w-3.5 h-3.5 fill-current" /> Play
+                  Highlighted line is <span className="text-fg font-medium">about to run</span>
+                  {step.iteration > 1 && <span className="text-fg-subtle"> (run #{step.iteration})</span>}
                 </>
               )}
-            </button>
-
-            <button
-              onClick={() => setCurrentStepIndex(Math.min(steps.length - 1, currentStepIndex + 1))}
-              disabled={currentStepIndex >= steps.length - 1}
-              className="px-3.5 py-1.5 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-300 hover:text-white border border-indigo-500/30 disabled:opacity-30 disabled:hover:bg-transparent transition flex items-center gap-1.5 text-xs font-semibold shadow-sm"
-              title="Next step (Click repeatedly to step through)"
-            >
-              <span>Next</span>
-              <SkipForward className="w-3.5 h-3.5" />
-            </button>
-
-            <button
-              onClick={handleJumpNextIteration}
-              className="px-3 py-1.5 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 transition font-medium flex items-center gap-1.5"
-              title="Jump to next occurrence of active line"
-            >
-              <Repeat className="w-3.5 h-3.5 text-amber-400" />
-              <span>Next Loop</span>
-            </button>
+            </span>
+            <span className="text-xs text-fg-subtle">left number = times run</span>
           </div>
-        </div>
-
-      </div>
-
-      {/* 2. Visualizer Split Layout */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 flex-1">
-        
-        {/* Left: Code Viewer with Line Highlights & Hit Counts */}
-        <div className="lg:col-span-7 rounded-2xl bg-slate-900/80 border border-slate-800 p-4 font-mono text-xs overflow-y-auto max-h-[580px] shadow-inner">
-          <div className="flex items-center justify-between text-slate-400 pb-2 mb-2 border-b border-slate-800 text-[11px]">
-            <span>Code Execution Trace</span>
-            {clickedLineNumber && (
-              <span className="text-amber-400">
-                Line {clickedLineNumber} executed{' '}
-                <strong>{traceResult.lineHitCounts[clickedLineNumber] || 0} times</strong>
-              </span>
-            )}
-          </div>
-
-          <div className="space-y-0.5">
-            {codeLines.map((line, idx) => {
-              const lineNum = idx + 1;
-              const isActive = lineNum === activeLineNumber;
+          <div className="font-mono text-[13px] leading-6 overflow-auto max-h-[520px] py-1">
+            {codeLines.map((line, i) => {
+              const lineNum = i + 1;
+              const active = lineNum === step.lineNumber;
               const hits = traceResult.lineHitCounts[lineNum] || 0;
-
               return (
                 <div
-                  key={idx}
-                  onClick={() => setClickedLineNumber(lineNum)}
-                  className={`flex items-center group cursor-pointer px-2 py-1 rounded-lg transition-all ${
-                    isActive
-                      ? 'bg-indigo-600/30 text-white border-l-4 border-indigo-500 shadow-sm'
-                      : 'hover:bg-slate-800/50 text-slate-300'
+                  key={i}
+                  ref={active ? activeLineRef : undefined}
+                  className={`flex border-l-[3px] ${
+                    active ? (isErrorStep ? 'border-danger bg-danger/10' : 'border-accent bg-accent/10') : 'border-transparent'
                   }`}
                 >
-                  <span
-                    className={`w-8 shrink-0 text-right pr-3 select-none text-[11px] ${
-                      isActive ? 'text-indigo-400 font-bold' : 'text-slate-600'
-                    }`}
-                  >
-                    {lineNum}
-                  </span>
-
-                  <span
-                    className={`text-[9px] px-1 py-0.2 rounded font-sans shrink-0 mr-2 select-none ${
-                      hits > 0 ? 'bg-slate-800 text-slate-400 group-hover:bg-amber-950/80 group-hover:text-amber-300' : 'text-transparent'
-                    }`}
-                  >
-                    {hits > 0 ? `${hits}x` : ''}
-                  </span>
-
-                  <pre className="overflow-x-auto whitespace-pre font-mono flex-1">
-                    {line || ' '}
-                  </pre>
+                  <span className="w-8 shrink-0 text-right pr-1 text-[11px] text-fg-subtle select-none tabular-nums">{hits > 0 ? `${hits}×` : ''}</span>
+                  <span className={`w-8 shrink-0 text-right pr-3 select-none tabular-nums ${active ? 'text-fg font-semibold' : 'text-fg-subtle'}`}>{lineNum}</span>
+                  <pre className={`whitespace-pre pr-4 ${active ? 'text-fg' : 'text-fg-muted'}`}>{line || ' '}</pre>
                 </div>
               );
             })}
           </div>
-        </div>
+        </section>
 
-        {/* Right: State Inspector */}
-        <div className="lg:col-span-5 flex flex-col space-y-4">
-          
-          {/* Variables Table */}
-          <div className="rounded-2xl bg-slate-900/80 border border-slate-800 p-4 shadow-sm flex-1">
-            <div className="flex items-center justify-between pb-2 mb-3 border-b border-slate-800">
-              <span className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
-                <Layers className="w-3.5 h-3.5 text-indigo-400" />
-                Variables State
-              </span>
-              <span className="text-[10px] text-slate-500 font-sans">
-                {currentStep.changedVariables.length > 0 ? (
-                  <span className="text-emerald-400 font-medium">
-                    {currentStep.changedVariables.length} variable modified
-                  </span>
-                ) : (
-                  'No state mutation'
-                )}
-              </span>
+        {/* State */}
+        <div className="xl:col-span-5 space-y-4">
+          <section className="card p-4">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-sm font-semibold text-fg">
+                Variables <span className="font-normal text-fg-subtle">in {fnLabel(step.functionName)}</span>
+              </h3>
+              <span className="text-xs text-fg-subtle">{step.changedVariables.length > 0 ? `${step.changedVariables.length} just changed` : ''}</span>
             </div>
 
-            {Object.keys(currentStep.variables).length === 0 ? (
-              <p className="text-xs text-slate-500 italic py-4 text-center">
-                No active variables initialized in this frame.
-              </p>
-            ) : (
-              <div className="space-y-1.5 overflow-y-auto max-h-[220px]">
-                {Object.entries(currentStep.variables).map(([name, val]) => {
-                  const isChanged = currentStep.changedVariables.includes(name);
+            {step.returnValue !== undefined && (
+              <div className="mb-2 flex items-start justify-between gap-3 rounded-md bg-accent/10 px-2.5 py-1.5 font-mono text-[13px]">
+                <span className="text-accent-text font-semibold">return</span>
+                <span className="text-fg break-all text-right">{step.returnValue}</span>
+              </div>
+            )}
 
+            {varEntries.length === 0 ? (
+              <p className="text-sm text-fg-subtle py-2">No variables yet.</p>
+            ) : (
+              <div className="divide-y divide-border max-h-[260px] overflow-y-auto font-mono text-[13px]">
+                {varEntries.map(([name, val]) => {
+                  const changed = step.changedVariables.includes(name);
+                  const old = changed && prev && prev.functionName === step.functionName ? prev.variables[name] : undefined;
                   return (
-                    <div
-                      key={name}
-                      className={`flex items-center justify-between p-2 rounded-xl text-xs font-mono transition-all ${
-                        isChanged
-                          ? 'bg-emerald-950/40 border border-emerald-500/50 text-emerald-200'
-                          : 'bg-slate-950/70 border border-slate-800/80 text-slate-300'
-                      }`}
-                    >
-                      <span className="font-semibold text-indigo-300">{name}</span>
-                      <span className="max-w-[200px] truncate text-slate-100 font-medium bg-slate-900/80 px-2 py-0.5 rounded border border-slate-800">
-                        {val}
+                    <div key={name} className={`flex items-start justify-between gap-3 py-1.5 px-1 ${changed ? 'bg-success/10' : ''}`}>
+                      <span className="text-fg font-medium shrink-0">{name}</span>
+                      <span className="text-right break-all">
+                        {old !== undefined && <span className="text-fg-subtle line-through mr-2">{old}</span>}
+                        <span className={changed ? 'text-success font-medium' : 'text-fg-muted'}>{val}</span>
                       </span>
                     </div>
                   );
                 })}
               </div>
             )}
-          </div>
+          </section>
 
-          {/* Call Stack & Stdout */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div className="rounded-xl bg-slate-900/80 border border-slate-800 p-3">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1.5">
-                Call Stack
-              </span>
-              <div className="space-y-1 max-h-24 overflow-y-auto text-xs font-mono">
-                {currentStep.callStack && currentStep.callStack.length > 0 ? (
-                  currentStep.callStack.map((frame, i) => (
-                    <div key={i} className="text-slate-300 bg-slate-950 px-2 py-1 rounded text-[11px] truncate">
-                      {frame.functionName}() <span className="text-slate-500 font-sans">#line {frame.lineNumber}</span>
-                    </div>
-                  ))
-                ) : (
-                  <span className="text-[11px] text-slate-500">&lt;module&gt;</span>
-                )}
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-1">
+            <section className="card p-4">
+              <h3 className="text-sm font-semibold text-fg mb-2">Call stack</h3>
+              <div className="space-y-1 max-h-28 overflow-y-auto font-mono text-xs">
+                {step.callStack.map((frame, i) => (
+                  <div key={i} className={`break-words ${i === 0 ? 'text-fg' : 'text-fg-subtle'}`}>
+                    {fnLabel(frame.functionName)} <span className="text-fg-subtle">line {frame.lineNumber}</span>
+                  </div>
+                ))}
               </div>
-            </div>
-
-            <div className="rounded-xl bg-slate-900/80 border border-slate-800 p-3">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1.5">
-                Standard Output
-              </span>
-              <pre className="text-[11px] text-emerald-400 bg-slate-950 p-2 rounded font-mono max-h-24 overflow-y-auto whitespace-pre-wrap">
-                {currentStep.stdoutSoFar || '<no output>'}
+            </section>
+            <section className="card p-4">
+              <h3 className="text-sm font-semibold text-fg mb-2">Output</h3>
+              <pre className="font-mono text-xs text-fg-muted whitespace-pre-wrap max-h-28 overflow-y-auto">
+                {step.stdoutSoFar || <span className="text-fg-subtle">Nothing printed yet</span>}
               </pre>
-            </div>
+            </section>
           </div>
 
-          {/* FEATURE D: AI Step Explainer */}
-          <div className="rounded-2xl bg-indigo-950/20 border border-indigo-900/40 p-4">
-            <div className="flex items-center justify-between mb-2">
-              <div className="flex items-center gap-1.5 text-xs font-bold text-indigo-300 uppercase tracking-wider">
-                <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
-                <span>AI Step Explainer</span>
-              </div>
-              <button
-                onClick={handleExplainCurrentStep}
-                disabled={explainingStep}
-                className="text-xs px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-medium transition flex items-center gap-1"
-              >
-                {explainingStep ? (
-                  <>
-                    <span className="w-3 h-3 rounded-full border border-white border-t-transparent animate-spin" />
-                    <span>Explaining...</span>
-                  </>
-                ) : (
-                  <>
-                    <HelpCircle className="w-3.5 h-3.5" /> Explain Step
-                  </>
-                )}
+          <section className="card p-4">
+            <div className="flex items-center justify-between gap-3 mb-2">
+              <h3 className="text-sm font-semibold text-fg">Explain this step</h3>
+              <button onClick={explain} disabled={explaining || !!explanation} className="btn-secondary btn-sm">
+                {explaining ? 'Explaining...' : explanation ? 'Explained' : 'Explain'}
               </button>
             </div>
-
-            {stepExplanation ? (
-              <div className="space-y-1.5 text-xs text-slate-200 bg-slate-950/80 p-3 rounded-xl border border-indigo-900/30">
-                <p><span className="font-semibold text-slate-300">Mutation:</span> {stepExplanation.explanation}</p>
-                <p className="text-indigo-300"><span className="font-semibold text-indigo-200">Algorithmic Context:</span> {stepExplanation.whyItRan}</p>
+            {explanation ? (
+              <div className="space-y-2 text-sm leading-6">
+                <div>
+                  <p className="section-label">What happens</p>
+                  <FormattedText text={explanation.explanation} className="text-fg" />
+                </div>
+                {explanation.whyItRan && (
+                  <div>
+                    <p className="section-label">Why the program is here</p>
+                    <FormattedText text={explanation.whyItRan} className="text-fg-muted" />
+                  </div>
+                )}
               </div>
             ) : (
-              <p className="text-[11px] text-slate-400">
-                Click &quot;Explain Step&quot; to inspect why this line was reached and its effect on state.
-              </p>
+              <p className="text-sm text-fg-subtle">AI explains what the highlighted line does with these values, and why the program reached it. Uses 1 AI request.</p>
             )}
-          </div>
-
+          </section>
         </div>
-
       </div>
-
     </div>
   );
 }
