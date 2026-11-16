@@ -279,30 +279,39 @@ export default function GmailAuthModal({
                     </p>
                   </div>
                 ) : (
-                  <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 text-xs space-y-3">
-                    <div className="flex items-center gap-2 text-indigo-300 font-semibold text-[12px]">
-                      <Sparkles className="w-4 h-4 text-indigo-400" />
-                      <span>Setup 1-Click Google OAuth in 2 Minutes</span>
+                  <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs space-y-3">
+                    <div className="text-center py-2 space-y-2">
+                      <p className="text-xs text-slate-300 font-medium">
+                        Instant Email Verification Available
+                      </p>
+                      <p className="text-[11px] text-slate-400 leading-relaxed">
+                        Sign in instantly with a 6-digit email verification code to access your complimentary starter quota.
+                      </p>
                     </div>
-                    <p className="text-[11px] text-slate-400 leading-relaxed">
-                      To enable official Google Sign-In with real popups (preventing fake emails), add your free Google Client ID in Vercel:
-                    </p>
-                    <ol className="list-decimal list-inside text-[11px] text-slate-300 space-y-1 pl-1">
-                      <li>Go to <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer" className="text-indigo-400 underline inline-flex items-center gap-0.5">Google Cloud Credentials <ExternalLink className="w-2.5 h-2.5" /></a></li>
-                      <li>Create an <strong>OAuth 2.0 Client ID</strong> (Web application)</li>
-                      <li>Add Origin: <code className="bg-slate-900 px-1 rounded text-[10px]">https://algo-buddy-gray.vercel.app</code></li>
-                      <li>Add <code className="bg-slate-900 px-1 rounded text-[10px]">NEXT_PUBLIC_GOOGLE_CLIENT_ID</code> in Vercel Environment Variables</li>
-                    </ol>
-                    <div className="pt-1">
-                      <button
-                        type="button"
-                        onClick={() => setAuthMethod('otp')}
-                        className="w-full py-2 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white transition flex items-center justify-center gap-1.5"
-                      >
-                        <span>Continue with Email OTP instead</span>
-                        <ArrowRight className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setAuthMethod('otp')}
+                      className="w-full py-2.5 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white transition flex items-center justify-center gap-1.5 shadow-md shadow-indigo-600/20"
+                    >
+                      <span>Continue with Email OTP</span>
+                      <ArrowRight className="w-3.5 h-3.5" />
+                    </button>
+
+                    <details className="pt-2 border-t border-slate-900 text-[10px] text-slate-500">
+                      <summary className="cursor-pointer hover:text-slate-400 transition select-none">
+                        Developer / Admin Setup Details
+                      </summary>
+                      <div className="mt-2 space-y-1.5 text-slate-400 pl-1 leading-relaxed">
+                        <p>To enable 1-click Google OAuth button in production:</p>
+                        <ol className="list-decimal list-inside space-y-1 pl-1 text-[10px]">
+                          <li>Go to Google Cloud Credentials console</li>
+                          <li>Create an OAuth 2.0 Client ID (Web application)</li>
+                          <li>Set Authorized JavaScript origin: <code className="bg-slate-900 px-1 rounded text-[10px]">https://algo-buddy-gray.vercel.app</code></li>
+                          <li>Add <code className="bg-slate-900 px-1 rounded text-[10px]">NEXT_PUBLIC_GOOGLE_CLIENT_ID</code> in Vercel and redeploy</li>
+                        </ol>
+                      </div>
+                    </details>
                   </div>
                 )}
               </div>

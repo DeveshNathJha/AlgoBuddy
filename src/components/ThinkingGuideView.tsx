@@ -95,7 +95,7 @@ export default function ThinkingGuideView({
     );
   }
 
-  const approaches = data.approaches && data.approaches.length > 0
+  const approaches = (Array.isArray(data.approaches) && data.approaches.length > 0)
     ? data.approaches
     : [
         {
@@ -120,7 +120,25 @@ export default function ThinkingGuideView({
         },
       ];
 
-  const currentApproach = approaches[selectedApproachIndex] || approaches[0];
+  const currentApproach = approaches[selectedApproachIndex] || approaches[0] || {
+    approachName: 'Approach',
+    tier: 'optimal',
+    timeComplexity: 'O(N)',
+    spaceComplexity: 'O(1)',
+    intuition: 'Algorithmic approach',
+    stepByStepAlgorithm: ['Initialize variables', 'Process elements', 'Return output'],
+    pseudocodeOrSnippet: '',
+    tradeoffsAndDrawbacks: '',
+  };
+
+  const coreConstraints = Array.isArray(data.coreConstraints) ? data.coreConstraints : [];
+  const recognizedPatterns = Array.isArray(data.recognizedPatterns) ? data.recognizedPatterns : [];
+  const edgeCases = Array.isArray(data.edgeCases) ? data.edgeCases : [];
+  const hints = Array.isArray(data.hints) ? data.hints : [];
+  const blueprint = data.implementationBlueprint;
+  const dataStructures = Array.isArray(blueprint?.dataStructuresNeeded) ? blueprint.dataStructuresNeeded : [];
+  const algorithmSteps = Array.isArray(blueprint?.algorithmSteps) ? blueprint.algorithmSteps : [];
+  const stepByStepAlgorithm = Array.isArray(currentApproach.stepByStepAlgorithm) ? currentApproach.stepByStepAlgorithm : [];
 
   return (
     <div className="space-y-6 pb-12">
@@ -168,7 +186,7 @@ export default function ThinkingGuideView({
             <span>Constraints &amp; Invariants</span>
           </div>
           <ul className="space-y-2">
-            {data.coreConstraints.map((c, i) => (
+            {coreConstraints.map((c, i) => (
               <li
                 key={i}
                 className="text-xs text-slate-300 flex items-start gap-2 bg-slate-950/60 p-2.5 rounded-xl border border-slate-800/60"
@@ -187,7 +205,7 @@ export default function ThinkingGuideView({
             <span>Pattern Recognition</span>
           </div>
           <div className="space-y-2.5">
-            {data.recognizedPatterns.map((p, i) => (
+            {recognizedPatterns.map((p, i) => (
               <div key={i} className="bg-slate-950/60 p-3 rounded-xl border border-slate-800/60">
                 <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 mb-1.5 font-mono">
                   {p.patternName}
@@ -267,7 +285,7 @@ export default function ThinkingGuideView({
               Step-by-Step Algorithmic Logic
             </span>
             <div className="space-y-1.5">
-              {currentApproach.stepByStepAlgorithm.map((step, sIdx) => (
+              {stepByStepAlgorithm.map((step, sIdx) => (
                 <div
                   key={sIdx}
                   className="flex items-start gap-2.5 text-xs text-slate-300 bg-slate-900/60 p-2.5 rounded-lg border border-slate-800/50"
@@ -338,7 +356,7 @@ export default function ThinkingGuideView({
                 Required Data Structures
               </span>
               <ul className="space-y-1.5">
-                {data.implementationBlueprint.dataStructuresNeeded.map((ds, i) => (
+                {dataStructures.map((ds, i) => (
                   <li key={i} className="text-xs text-slate-300 flex items-center gap-2">
                     <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                     <span>{ds}</span>
@@ -353,7 +371,7 @@ export default function ThinkingGuideView({
                 Coding Action Checklist
               </span>
               <ul className="space-y-1.5">
-                {data.implementationBlueprint.algorithmSteps.map((step, i) => (
+                {algorithmSteps.map((step, i) => (
                   <li key={i} className="text-xs text-slate-300 flex items-start gap-2">
                     <ArrowRight className="w-3.5 h-3.5 text-indigo-400 shrink-0 mt-0.5" />
                     <span className="leading-relaxed">{step}</span>
@@ -388,7 +406,7 @@ export default function ThinkingGuideView({
         </p>
 
         <div className="space-y-3">
-          {data.hints.map((hint) => {
+          {hints.map((hint) => {
             const isRevealed = revealedLevels.includes(hint.level);
             return (
               <div
@@ -430,13 +448,13 @@ export default function ThinkingGuideView({
       </div>
 
       {/* 6. Edge Cases Checklist */}
-      {data.edgeCases && data.edgeCases.length > 0 && (
+      {edgeCases.length > 0 && (
         <div className="p-4 rounded-2xl bg-slate-900/50 border border-slate-800">
           <span className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-2">
             5. Edge Cases &amp; Boundary Conditions
           </span>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            {data.edgeCases.map((edge, i) => (
+            {edgeCases.map((edge, i) => (
               <div
                 key={i}
                 className="flex items-center gap-2 text-xs text-slate-300 bg-slate-950/60 p-2.5 rounded-lg border border-slate-800/60"

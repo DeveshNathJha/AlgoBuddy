@@ -63,6 +63,299 @@ function extractAndParseJSON<T>(rawText: string): T {
 }
 
 /**
+ * Universal safe array extractor that transforms arrays, strings, or malformed
+ * objects into a guaranteed array of clean strings.
+ */
+function toArrayOfStrings(val: any): string[] {
+  if (Array.isArray(val)) {
+    return val
+      .map((item) => {
+        if (typeof item === 'string') return item.trim();
+        if (typeof item === 'object' && item !== null) {
+          // If object has description or title or value
+          return (item.description || item.text || item.title || item.step || JSON.stringify(item)).trim();
+        }
+        return String(item).trim();
+      })
+      .filter(Boolean);
+  }
+
+  if (typeof val === 'string' && val.trim().length > 0) {
+    if (val.includes('\n')) {
+      return val
+        .split('\n')
+        .map((line) => line.replace(/^[-*•\d+.)]\s*/, '').trim())
+        .filter(Boolean);
+    }
+    return [val.trim()];
+  }
+
+  if (typeof val === 'object' && val !== null) {
+    return Object.values(val)
+      .map((item) => (typeof item === 'string' ? item.trim() : String(item).trim()))
+      .filter(Boolean);
+  }
+
+  return [];
+}
+
+/**
+ * Robust sanitizer that guarantees 100% schema integrity for ThinkingGuideData.
+ * Prevents any runtime TypeError when React views call .map().
+ */
+export function sanitizeThinkingGuideData(raw: any, lang: string = 'Python'): ThinkingGuideData {
+  if (!raw || typeof raw !== 'object') {
+    throw new Error('Invalid response structure received from AI.');
+  }
+
+  const simplifiedProblem =
+    typeof raw.simplifiedProblem === 'string' && raw.simplifiedProblem.trim()
+      ? raw.simplifiedProblem.trim()
+      : 'Analyze the problem constraints and construct an optimal algorithmic solution.';
+
+  const coreConstraints = toArrayOfStrings(raw.coreConstraints);
+  if (coreConstraints.length === 0) {
+    coreConstraints.push('Examine input size bounds and asymptotic runtime requirements.');
+    coreConstraints.push('Check boundary states, negative/duplicate values, and empty inputs.');
+  }
+
+  // Handle recognizedPatterns: could be [{patternName, whyThisPattern}] or ["Two Pointers", "Heap"]
+  let recognizedPatterns: Array<{ patternName: string; whyThisPattern: string }> = [];
+  if (Array.isArray(raw.recognizedPatterns)) {
+    recognizedPatterns = raw.recognizedPatterns.map((p: any) => {
+      if (typeof p === 'string') {
+        return {
+          patternName: p,
+          whyThisPattern: 'Selected to satisfy time and space efficiency requirements under given constraints.',
+        };
+      }
+      return {
+        patternName: typeof p?.patternName === 'string' && p.patternName.trim() ? p.patternName : 'Algorithmic Pattern',
+        whyThisPattern:
+          typeof p?.whyThisPattern === 'string' && p.whyThisPattern.trim()
+            ? p.whyThisPattern
+            : 'Essential pattern to meet target asymptotic complexity.',
+      };
+    });
+  } else if (typeof raw.recognizedPatterns === 'string') {
+    recognizedPatterns = [
+      {
+        patternName: 'Core Algorithmic Pattern',
+        whyThisPattern: raw.recognizedPatterns,
+      },
+    ];
+  }
+  if (recognizedPatterns.length === 0) {
+    recognizedPatterns.push({
+      patternName: 'Optimal Data Structure Traversal',
+      whyThisPattern: 'Identified based on problem invariants and runtime constraints.',
+    });
+  }
+
+  // Handle approaches
+  let rawApproaches: any[] = [];
+  if (Array.isArray(raw.approaches) && raw.approaches.length > 0) {
+    rawApproaches = raw.approaches;
+  } else {
+    // Fallback using bruteForce & optimizedApproach if present
+    rawApproaches = [
+      {
+        approachName: 'Approach 1: Brute Force',
+        tier: 'brute-force',
+        timeComplexity: raw.bruteForce?.timeComplexity || 'O(N^2)',
+        spaceComplexity: raw.bruteForce?.spaceComplexity || 'O(1)',
+        intuition: raw.bruteForce?.approach || 'Exhaustive search evaluating all possible candidate states.',
+        stepByStepAlgorithm: [raw.bruteForce?.approach || 'Check all combinations iteratively.'],
+        pseudocodeOrSnippet: '',
+        tradeoffsAndDrawbacks: raw.bruteForce?.drawback || 'Computationally inefficient for large problem bounds.',
+      },
+      {
+        approachName: 'Approach 2: Optimal Solution',
+        tier: 'optimal',
+        timeComplexity: raw.optimizedApproach?.timeComplexity || 'O(N)',
+        spaceComplexity: raw.optimizedApproach?.spaceComplexity || 'O(1)',
+        intuition: raw.optimizedApproach?.keyIntuition || 'Direct optimal traversal utilizing invariants.',
+        stepByStepAlgorithm: [raw.optimizedApproach?.approach || 'Single-pass optimal traversal.'],
+        pseudocodeOrSnippet: '',
+        tradeoffsAndDrawbacks: 'Target production complexity.',
+      },
+    ];
+  }
+
+  const approaches = rawApproaches.map((app: any, idx: number) => {
+    const tier =
+      app.tier === 'optimal' || app.tier === 'better' || app.tier === 'brute-force'
+        ? app.tier
+        : idx === 0
+        ? 'brute-force'
+        : idx === rawApproaches.length - 1
+        ? 'optimal'
+        : 'better';
+
+    const steps = toArrayOfStrings(app.stepByStepAlgorithm);
+    if (steps.length === 0) {
+      steps.push('Initialize required variables, structures, and bounds.');
+      steps.push('Traverse elements maintaining problem invariants.');
+      steps.push('Format and return target result.');
+    }
+
+    return {
+      approachName: typeof app.approachName === 'string' && app.approachName.trim() ? app.approachName : `Approach ${idx + 1}`,
+      tier,
+      timeComplexity: typeof app.timeComplexity === 'string' && app.timeComplexity.trim() ? app.timeComplexity : 'O(N)',
+      spaceComplexity: typeof app.spaceComplexity === 'string' && app.spaceComplexity.trim() ? app.spaceComplexity : 'O(1)',
+      intuition: typeof app.intuition === 'string' && app.intuition.trim() ? app.intuition : 'Core algorithmic intuition.',
+      stepByStepAlgorithm: steps,
+      pseudocodeOrSnippet: typeof app.pseudocodeOrSnippet === 'string' ? app.pseudocodeOrSnippet : '',
+      tradeoffsAndDrawbacks:
+        typeof app.tradeoffsAndDrawbacks === 'string' && app.tradeoffsAndDrawbacks.trim()
+          ? app.tradeoffsAndDrawbacks
+          : 'Analyzed for computational scalability.',
+    };
+  });
+
+  // Handle implementationBlueprint
+  let implementationBlueprint: ThinkingGuideData['implementationBlueprint'] = undefined;
+  if (raw.implementationBlueprint && typeof raw.implementationBlueprint === 'object') {
+    const ds = toArrayOfStrings(raw.implementationBlueprint.dataStructuresNeeded);
+    const algo = toArrayOfStrings(raw.implementationBlueprint.algorithmSteps);
+    implementationBlueprint = {
+      dataStructuresNeeded: ds.length > 0 ? ds : [`Standard library collections suitable for ${lang}`],
+      algorithmSteps:
+        algo.length > 0
+          ? algo
+          : ['1. Initialize pointers/structures', '2. Process input sequence', '3. Return computed result'],
+      starterCodeTemplate:
+        typeof raw.implementationBlueprint.starterCodeTemplate === 'string'
+          ? raw.implementationBlueprint.starterCodeTemplate
+          : `// Solution scaffold in ${lang}\n`,
+    };
+  }
+
+  // Handle edgeCases
+  const edgeCases = toArrayOfStrings(raw.edgeCases);
+  if (edgeCases.length === 0) {
+    edgeCases.push('Empty or minimal input collection boundary');
+    edgeCases.push('All elements identical or duplicate values');
+    edgeCases.push('Extreme upper constraints and integer bounds');
+  }
+
+  // Handle hints
+  let hints: ThinkingGuideData['hints'] = [];
+  if (Array.isArray(raw.hints) && raw.hints.length > 0) {
+    hints = raw.hints.map((h: any, i: number) => ({
+      level: typeof h?.level === 'number' ? h.level : i + 1,
+      title: typeof h?.title === 'string' && h.title.trim() ? h.title : `Level ${i + 1} Hint`,
+      content:
+        typeof h?.content === 'string' && h.content.trim()
+          ? h.content
+          : 'Consider how the problem can be broken into smaller subproblems.',
+      revealed: Boolean(h?.revealed),
+    }));
+  } else {
+    hints = [
+      {
+        level: 1,
+        title: 'Level 1: Directional Nudge',
+        content: 'Identify what repetitive work a naive solution does that can be cached or skipped.',
+        revealed: true,
+      },
+      {
+        level: 2,
+        title: 'Level 2: Data Structure Guidance',
+        content: 'Consider which data structure allows O(1) or O(log N) state maintenance for this pattern.',
+        revealed: false,
+      },
+      {
+        level: 3,
+        title: 'Level 3: Algorithmic Invariants',
+        content: 'Formulate the condition that must remain true at every iteration of your main loop.',
+        revealed: false,
+      },
+      {
+        level: 4,
+        title: 'Level 4: Implementation Blueprint',
+        content: 'Trace border conditions and boundary updates before moving inward.',
+        revealed: false,
+      },
+    ];
+  }
+
+  return {
+    simplifiedProblem,
+    coreConstraints,
+    recognizedPatterns,
+    approaches,
+    bruteForce: {
+      approach: typeof raw.bruteForce?.approach === 'string' ? raw.bruteForce.approach : approaches[0].intuition,
+      timeComplexity: typeof raw.bruteForce?.timeComplexity === 'string' ? raw.bruteForce.timeComplexity : approaches[0].timeComplexity,
+      spaceComplexity: typeof raw.bruteForce?.spaceComplexity === 'string' ? raw.bruteForce.spaceComplexity : approaches[0].spaceComplexity,
+      drawback: typeof raw.bruteForce?.drawback === 'string' ? raw.bruteForce.drawback : approaches[0].tradeoffsAndDrawbacks,
+    },
+    optimizedApproach: {
+      approach: typeof raw.optimizedApproach?.approach === 'string' ? raw.optimizedApproach.approach : approaches[approaches.length - 1].intuition,
+      timeComplexity: typeof raw.optimizedApproach?.timeComplexity === 'string' ? raw.optimizedApproach.timeComplexity : approaches[approaches.length - 1].timeComplexity,
+      spaceComplexity: typeof raw.optimizedApproach?.spaceComplexity === 'string' ? raw.optimizedApproach.spaceComplexity : approaches[approaches.length - 1].spaceComplexity,
+      keyIntuition: typeof raw.optimizedApproach?.keyIntuition === 'string' ? raw.optimizedApproach.keyIntuition : approaches[approaches.length - 1].intuition,
+    },
+    implementationBlueprint,
+    edgeCases,
+    hints,
+  };
+}
+
+/**
+ * Robust sanitizer that guarantees 100% schema integrity for InterviewScriptData.
+ */
+export function sanitizeInterviewScriptData(raw: any, lang: string = 'Python'): InterviewScriptData {
+  if (!raw || typeof raw !== 'object') {
+    throw new Error('Invalid interview script data received.');
+  }
+
+  const problemSummary =
+    typeof raw.problemSummary === 'string' && raw.problemSummary.trim()
+      ? raw.problemSummary.trim()
+      : 'Here is a complete verbal interview walkthrough solving the problem methodically.';
+
+  let sections: InterviewScriptData['sections'] = [];
+  if (Array.isArray(raw.sections) && raw.sections.length > 0) {
+    sections = raw.sections.map((s: any, idx: number) => ({
+      id: typeof s?.id === 'string' && s.id.trim() ? s.id : `section-${idx}`,
+      phase: typeof s?.phase === 'string' && s.phase.trim() ? s.phase : `Stage ${idx + 1}`,
+      speakingScript:
+        typeof s?.speakingScript === 'string' && s.speakingScript.trim()
+          ? s.speakingScript
+          : 'Explaining the algorithmic logic clearly to the interviewer...',
+      interviewerReactionHint:
+        typeof s?.interviewerReactionHint === 'string' && s.interviewerReactionHint.trim()
+          ? s.interviewerReactionHint
+          : 'Interviewer evaluates proactive verbal communication.',
+      keyPoints: toArrayOfStrings(s?.keyPoints),
+    }));
+  }
+
+  const timeComplexityExplanation =
+    typeof raw.timeComplexityExplanation === 'string' && raw.timeComplexityExplanation.trim()
+      ? raw.timeComplexityExplanation
+      : 'The time complexity is bounded by input traversal and structure operations.';
+
+  const spaceComplexityExplanation =
+    typeof raw.spaceComplexityExplanation === 'string' && raw.spaceComplexityExplanation.trim()
+      ? raw.spaceComplexityExplanation
+      : 'The auxiliary space complexity is determined by the extra storage allocated.';
+
+  const proTips = toArrayOfStrings(raw.proTips);
+
+  return {
+    problemSummary,
+    sections,
+    timeComplexityExplanation,
+    spaceComplexityExplanation,
+    proTips,
+  };
+}
+
+/**
  * Standardized LLM completions dispatcher across Gemini, Groq, and OpenAI
  */
 async function callLLM(prompt: string, systemInstruction: string, options: GenerationOptions): Promise<string> {
@@ -292,35 +585,8 @@ Generate structured problem decomposition with multiple approaches and an implem
 `;
 
   const raw = await callLLM(prompt, systemInstruction, options);
-  const parsed = extractAndParseJSON<ThinkingGuideData>(raw);
-
-  // Guarantee backwards compatibility if approaches is missing
-  if (!parsed.approaches || parsed.approaches.length === 0) {
-    parsed.approaches = [
-      {
-        approachName: 'Approach 1: Brute Force',
-        tier: 'brute-force',
-        timeComplexity: parsed.bruteForce?.timeComplexity || 'O(N^2)',
-        spaceComplexity: parsed.bruteForce?.spaceComplexity || 'O(1)',
-        intuition: parsed.bruteForce?.approach || 'Check all possibilities',
-        stepByStepAlgorithm: [parsed.bruteForce?.approach || 'Exhaustive search'],
-        pseudocodeOrSnippet: '',
-        tradeoffsAndDrawbacks: parsed.bruteForce?.drawback || 'Too slow for large N',
-      },
-      {
-        approachName: 'Approach 2: Optimal Solution',
-        tier: 'optimal',
-        timeComplexity: parsed.optimizedApproach?.timeComplexity || 'O(N)',
-        spaceComplexity: parsed.optimizedApproach?.spaceComplexity || 'O(1)',
-        intuition: parsed.optimizedApproach?.keyIntuition || 'Direct optimal lookup',
-        stepByStepAlgorithm: [parsed.optimizedApproach?.approach || 'Optimal single pass'],
-        pseudocodeOrSnippet: '',
-        tradeoffsAndDrawbacks: 'Optimal time complexity',
-      },
-    ];
-  }
-
-  return parsed;
+  const parsed = extractAndParseJSON<any>(raw);
+  return sanitizeThinkingGuideData(parsed, lang);
 }
 
 /**
@@ -405,7 +671,8 @@ Return detailed, word-for-word verbal script matching this JSON schema:
 `;
 
   const raw = await callLLM(prompt, systemInstruction, options);
-  return extractAndParseJSON<InterviewScriptData>(raw);
+  const parsed = extractAndParseJSON<any>(raw);
+  return sanitizeInterviewScriptData(parsed, lang);
 }
 
 /**

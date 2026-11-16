@@ -115,6 +115,9 @@ export default function InterviewScriptView({
     );
   }
 
+  const sections = Array.isArray(data.sections) ? data.sections : [];
+  const proTips = Array.isArray(data.proTips) ? data.proTips : [];
+
   return (
     <div className="space-y-6 pb-12">
 
@@ -128,7 +131,7 @@ export default function InterviewScriptView({
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <span className="text-[11px] px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-medium">
-            5 Stages Covered
+            {sections.length} Stages Covered
           </span>
           <button
             onClick={onGenerate}
@@ -144,8 +147,9 @@ export default function InterviewScriptView({
 
       {/* Script Sections */}
       <div className="space-y-4">
-        {data.sections.map((section: ScriptSection) => {
+        {sections.map((section: ScriptSection) => {
           const isCurrentSpeaking = isSpeaking && activeSpeakingSection === section.id;
+          const keyPoints = Array.isArray(section.keyPoints) ? section.keyPoints : [];
 
           return (
             <div
@@ -207,7 +211,7 @@ export default function InterviewScriptView({
                 </div>
 
                 <div className="flex items-center gap-1.5">
-                  {section.keyPoints.map((point, idx) => (
+                  {keyPoints.map((point, idx) => (
                     <span
                       key={idx}
                       className="text-[10px] bg-slate-800 px-2 py-0.5 rounded text-slate-300 font-medium"
@@ -247,14 +251,14 @@ export default function InterviewScriptView({
       </div>
 
       {/* Pro Tips */}
-      {data.proTips && data.proTips.length > 0 && (
+      {proTips.length > 0 && (
         <div className="p-4 rounded-2xl bg-slate-900/60 border border-slate-800">
           <div className="flex items-center gap-1.5 text-xs font-bold text-amber-400 uppercase tracking-wider mb-2">
             <Award className="w-4 h-4" />
             <span>Interview Presentation Principles</span>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-slate-300">
-            {data.proTips.map((tip, idx) => (
+            {proTips.map((tip, idx) => (
               <div
                 key={idx}
                 className="bg-slate-950/70 p-2.5 rounded-xl border border-slate-800/60 flex items-start gap-2"

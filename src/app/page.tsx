@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import Navbar from '@/components/Navbar';
-import CodeEditor from '@/components/CodeEditor';
+import CodeEditor, { getStarterTemplate } from '@/components/CodeEditor';
 import DryRunVisualizer from '@/components/DryRunVisualizer';
 import ThinkingGuideView from '@/components/ThinkingGuideView';
 import InterviewScriptView from '@/components/InterviewScriptView';
@@ -119,6 +119,26 @@ export default function Home() {
     const firstLine = newText.trim().split('\n')[0].replace(/^#+\s*/, '').substring(0, 40);
     const newTitle = firstLine || 'Custom Problem';
     setProblemTitle(newTitle);
+
+    // Reset stale AI analysis data when problem statement changes
+    setThinkingData(null);
+    setInterviewData(null);
+
+    // If the editor currently contains one of the preset codes (e.g. Two Sum),
+    // automatically swap to clean starter template so old code doesn't linger!
+    const isPresetCode = DSA_PRESETS.some(
+      (p) =>
+        p.defaultCode.trim() === code.trim() ||
+        Object.values(p.codeByLanguage || {}).some((c) => c.trim() === code.trim())
+    );
+    if (isPresetCode && newText.trim().length > 0) {
+      const cleanTemplate = getStarterTemplate(language);
+      setCode(cleanTemplate);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('algobuddy_active_code', cleanTemplate);
+      }
+    }
+
     if (typeof window !== 'undefined') {
       localStorage.setItem('algobuddy_active_problem', newText);
       localStorage.setItem('algobuddy_active_title', newTitle);
