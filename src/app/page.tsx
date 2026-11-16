@@ -74,7 +74,13 @@ export default function Home() {
       const groqModel = localStorage.getItem('algobuddy_model_groq') || 'openai/gpt-oss-20b';
       const openaiModel = localStorage.getItem('algobuddy_model_openai') || 'gpt-4o-mini';
 
-      const savedEmail = localStorage.getItem('algobuddy_user_email') || localStorage.getItem('coding_buddy_user_email');
+      let savedEmail = localStorage.getItem('algobuddy_user_email') || localStorage.getItem('coding_buddy_user_email');
+      // Clean up legacy test mock email
+      if (savedEmail === 'engineer@domain.com') {
+        localStorage.removeItem('algobuddy_user_email');
+        localStorage.removeItem('coding_buddy_user_email');
+        savedEmail = null;
+      }
       const savedUsed = parseInt(localStorage.getItem('algobuddy_free_used') || localStorage.getItem('coding_buddy_free_used') || '0', 10);
 
       setLanguage(savedLang);
@@ -151,6 +157,13 @@ export default function Home() {
       const updated = freeQuestionsUsed + 1;
       setFreeQuestionsUsed(updated);
       localStorage.setItem('algobuddy_free_used', updated.toString());
+      if (userEmail) {
+        fetch('/api/auth/record-usage', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: userEmail }),
+        }).catch((err) => console.error('Failed to sync quota to server', err));
+      }
     }
   };
 

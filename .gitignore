@@ -34,8 +34,9 @@ yarn-error.log*
 .env.development
 .env.local.example
 
-# Local notes
+# Local notes & user database
 obj.txt
+/data/*.json
 
 # OS / Editor artifacts
 .DS_Store
